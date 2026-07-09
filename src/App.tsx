@@ -1,0 +1,1717 @@
+﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect } from "react";
+
+import {
+  CANVAS_SELECTION_PRESETS,
+  EMPTY_CELL,
+  getAllPalettes,
+  getColorLookup,
+  getPaletteById
+} from "./constants";
+import { normalizeSearchText } from "./palette-utils";
+import { useBeadStore } from "./store";
+import type { BeadColor } from "./types";
+
+const MIN_SCALE = 8;
+const MAX_SCALE = 40;
+const BOARD_SCROLL_PADDING = 28;
+const BOARD_FRAME_EXTRA = 28;
+const clampScale = (value: number) => Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
+const COLOR_PAGE_SIZE = 20;
+const MAJOR_GRID_STEP = 5;
+const MAJOR_GUIDE_LABEL_START = 2;
+const MAJOR_GUIDE_LINE_OFFSET = 1;
+const EMPTY_GRID_STROKE = "#c1c8d1";
+const FILLED_GRID_STROKE = "rgba(118, 126, 137, 0.58)";
+const BOARD_OUTLINE_STROKE = "#ec7b6f";
+const MAJOR_GRID_STROKE = "rgba(236, 84, 69, 0.9)";
+
+const isMajorGuideValue = (value: number) =>
+  value === MAJOR_GUIDE_LABEL_START || (value - MAJOR_GUIDE_LABEL_START) % MAJOR_GRID_STEP === 0;
+const getMajorGuideLineWidth = (cellSize: number) => (cellSize >= 16 ? 2 : 1);
+
+const getRulerSize = (cellScale: number) => Math.max(20, Math.min(28, cellScale + 8));
+
+const getBoardShellWidth = (cols: number, cellScale: number) =>
+  cols * cellScale + getRulerSize(cellScale) * 2 + BOARD_FRAME_EXTRA;
+
+const getAutoFitScaleLimit = (cols: number) => {
+  if (cols <= 16) {
+    return 28;
+  }
+  if (cols <= 29) {
+    return 18;
+  }
+  if (cols <= 32) {
+    return 16;
+  }
+  if (cols <= 48) {
+    return 12;
+  }
+  return 9;
+};
+
+const getMaxBoardScaleForWidth = (cols: number, availableWidth: number) => {
+  let fittedScale = MIN_SCALE;
+  for (let nextScale = MIN_SCALE; nextScale <= MAX_SCALE; nextScale += 1) {
+    if (getBoardShellWidth(cols, nextScale) <= availableWidth) {
+      fittedScale = nextScale;
+      continue;
+    }
+    break;
+  }
+  return Math.min(fittedScale, getAutoFitScaleLimit(cols));
+};
+
+type DrawBoardOptions = {
+  showMinorGrid?: boolean;
+  showMajorGrid?: boolean;
+  showOutline?: boolean;
+  hoverCellIndex?: number | null;
+  flashCellIndex?: number | null;
+};
+
+type FloatingPanelPosition = {
+  x: number;
+  y: number;
+};
+
+type FloatingPanelSize = {
+  width: number;
+  height: number;
+};
+
+type BoardZoomAnchor = {
+  anchorX: number;
+  anchorY: number;
+  viewportX: number;
+  viewportY: number;
+  scaleRatio: number;
+};
+
+const FLOATING_COLOR_PANEL_WIDTH = 380;
+const FLOATING_COLOR_PANEL_HEIGHT = 720;
+const FLOATING_COLOR_PANEL_MIN_WIDTH = 320;
+const FLOATING_COLOR_PANEL_MIN_HEIGHT = 420;
+const FLOATING_COLOR_PANEL_MARGIN = 20;
+const FLOATING_COLOR_PANEL_STORAGE_KEY = "cyber-pingdou:floating-color-panel";
+
+const createDefaultFloatingPosition = (): FloatingPanelPosition => {
+  if (typeof window === "undefined") {
+    return { x: 0, y: 96 };
+  }
+  return {
+    x: Math.max(
+      FLOATING_COLOR_PANEL_MARGIN,
+      window.innerWidth - FLOATING_COLOR_PANEL_WIDTH - FLOATING_COLOR_PANEL_MARGIN
+    ),
+    y: 96
+  };
+};
+
+const clampFloatingPosition = (
+  position: FloatingPanelPosition,
+  panelWidth: number,
+  panelHeight: number
+): FloatingPanelPosition => {
+  if (typeof window === "undefined") {
+    return position;
+  }
+  return {
+    x: Math.min(
+      Math.max(FLOATING_COLOR_PANEL_MARGIN, position.x),
+      Math.max(FLOATING_COLOR_PANEL_MARGIN, window.innerWidth - panelWidth - FLOATING_COLOR_PANEL_MARGIN)
+    ),
+    y: Math.min(
+      Math.max(FLOATING_COLOR_PANEL_MARGIN, position.y),
+      Math.max(FLOATING_COLOR_PANEL_MARGIN, window.innerHeight - panelHeight - FLOATING_COLOR_PANEL_MARGIN)
+    )
+  };
+};
+
+const clampFloatingSize = (size: FloatingPanelSize): FloatingPanelSize => {
+  if (typeof window === "undefined") {
+    return size;
+  }
+  return {
+    width: Math.min(
+      Math.max(FLOATING_COLOR_PANEL_MIN_WIDTH, size.width),
+      Math.max(FLOATING_COLOR_PANEL_MIN_WIDTH, window.innerWidth - FLOATING_COLOR_PANEL_MARGIN * 2)
+    ),
+    height: Math.min(
+      Math.max(FLOATING_COLOR_PANEL_MIN_HEIGHT, size.height),
+      Math.max(FLOATING_COLOR_PANEL_MIN_HEIGHT, window.innerHeight - FLOATING_COLOR_PANEL_MARGIN * 2)
+    )
+  };
+};
+
+const hexToRgb = (hex: string) => {
+  const value = hex.replace("#", "");
+  const normalized = value.length === 3 ? value.split("").map((part) => part + part).join("") : value;
+  const number = Number.parseInt(normalized, 16);
+  return {
+    r: (number >> 16) & 255,
+    g: (number >> 8) & 255,
+    b: number & 255
+  };
+};
+
+const formatRgb = (hex: string) => {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
+const getRgbLabel = (color: BeadColor) => color.rgb ?? formatRgb(color.hex);
+
+const getColorLabel = (color: BeadColor) =>
+  color.name && color.name !== color.code ? `${color.code} · ${color.name}` : color.code;
+
+const getColorSearchKeywords = (color: BeadColor) => {
+  const { r, g, b } = hexToRgb(color.hex);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  const lightness = (max + min) / 2;
+  const saturation = max === 0 ? 0 : delta / max;
+  let hue = 0;
+
+  if (delta !== 0) {
+    if (max === r) {
+      hue = ((g - b) / delta) % 6;
+    } else if (max === g) {
+      hue = (b - r) / delta + 2;
+    } else {
+      hue = (r - g) / delta + 4;
+    }
+    hue *= 60;
+    if (hue < 0) {
+      hue += 360;
+    }
+  }
+
+  const keywords = new Set<string>();
+  const addKeywords = (...values: string[]) => {
+    values.forEach((value) => keywords.add(value));
+  };
+
+  if (lightness <= 56) {
+    addKeywords("黑色", "黑", "深色", "深黑", "炭黑", "墨色");
+  } else if (saturation <= 0.1 && lightness >= 236) {
+    addKeywords("白色", "白", "亮色", "纯白", "奶白", "米白");
+  } else if (saturation <= 0.12) {
+    addKeywords("灰色", "灰", "中性色", "银灰", "浅灰", "深灰");
+  }
+
+  if (r >= 198 && g >= 160 && b >= 120 && r >= g && g >= b) {
+    addKeywords("肤色", "肉色", "米色", "杏色", "裸色", "奶茶色", "米白", "奶油色");
+  }
+
+  if (r >= 90 && g >= 55 && b <= 90 && lightness <= 150) {
+    addKeywords("棕色", "咖啡色", "褐色", "深棕", "咖色", "巧克力色");
+  }
+
+  if (saturation > 0.12) {
+    if (hue < 15 || hue >= 345) {
+      addKeywords("红色", "红", "正红");
+      if (lightness < 110) {
+        addKeywords("酒红", "暗红", "枣红", "砖红");
+      } else if (lightness > 190) {
+        addKeywords("粉红", "浅红");
+      }
+    } else if (hue < 45) {
+      addKeywords("橙色", "橙", "橘色", "橘", "橘黄");
+      if (lightness > 185) {
+        addKeywords("杏色", "蜜桃色");
+      }
+    } else if (hue < 70) {
+      addKeywords("黄色", "黄", "金色", "土黄");
+      if (lightness > 200) {
+        addKeywords("柠檬黄", "浅黄", "奶黄");
+      } else if (lightness < 150) {
+        addKeywords("姜黄", "芥末黄", "深黄");
+      }
+    } else if (hue < 170) {
+      addKeywords("绿色", "绿");
+      if (hue < 95) {
+        addKeywords("黄绿", "草绿", "嫩绿");
+      } else if (hue < 130) {
+        addKeywords("正绿", "叶绿色");
+      } else {
+        addKeywords("青绿", "薄荷绿", "豆绿");
+      }
+      if (lightness < 110) {
+        addKeywords("墨绿", "深绿", "军绿");
+      } else if (lightness > 190) {
+        addKeywords("浅绿", "淡绿");
+      }
+    } else if (hue < 200) {
+      addKeywords("青色", "青", "蓝绿色", "湖蓝", "青蓝", "孔雀蓝");
+    } else if (hue < 255) {
+      addKeywords("蓝色", "蓝");
+      if (lightness < 95) {
+        addKeywords("深蓝", "藏青", "海军蓝", "墨蓝");
+      } else if (lightness > 185) {
+        addKeywords("浅蓝", "天蓝", "雾蓝", "冰蓝");
+      } else {
+        addKeywords("宝蓝", "湖蓝");
+      }
+    } else if (hue < 290) {
+      addKeywords("紫色", "紫", "蓝紫", "葡萄紫");
+      if (lightness > 180) {
+        addKeywords("浅紫", "薰衣草", "丁香紫");
+      } else if (lightness < 110) {
+        addKeywords("深紫", "暗紫");
+      }
+    } else if (hue < 345) {
+      addKeywords("粉色", "粉", "玫红", "桃粉", "豆沙粉");
+      if (lightness < 150) {
+        addKeywords("梅子色", "紫红");
+      } else {
+        addKeywords("浅粉", "樱花粉");
+      }
+    }
+  }
+
+  return [...keywords];
+};
+
+const colorDistance = (left: BeadColor, right: BeadColor) => {
+  const a = hexToRgb(left.hex);
+  const b = hexToRgb(right.hex);
+  return Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
+};
+
+const drawBoardToCanvas = (
+  canvas: HTMLCanvasElement,
+  rows: number,
+  cols: number,
+  cells: string[],
+  paletteMap: Map<string, string>,
+  cellSize: number,
+  options: DrawBoardOptions = {}
+) => {
+  const {
+    showMinorGrid = true,
+    showMajorGrid = false,
+    showOutline = true,
+    hoverCellIndex = null,
+    flashCellIndex = null
+  } = options;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+
+  canvas.width = cols * cellSize;
+  canvas.height = rows * cellSize;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = row * cols + col;
+      const cell = cells[index];
+      const x = col * cellSize;
+      const y = row * cellSize;
+
+      ctx.fillStyle = cell === EMPTY_CELL ? "#ffffff" : paletteMap.get(cell) ?? "#ffffff";
+      ctx.fillRect(x, y, cellSize, cellSize);
+
+      if (showMinorGrid) {
+        ctx.strokeStyle = cell === EMPTY_CELL ? EMPTY_GRID_STROKE : FILLED_GRID_STROKE;
+        ctx.lineWidth = Math.max(0.85, Math.min(1.35, cellSize / 18));
+        ctx.strokeRect(x + 0.5, y + 0.5, cellSize - 1, cellSize - 1);
+      }
+
+    }
+  }
+
+  if (showMajorGrid) {
+    ctx.save();
+    ctx.strokeStyle = MAJOR_GRID_STROKE;
+    const majorGuideLineWidth = getMajorGuideLineWidth(cellSize);
+    const majorGuideOffset = majorGuideLineWidth % 2 === 0 ? 0 : 0.5;
+    ctx.lineWidth = majorGuideLineWidth;
+
+    for (let row = MAJOR_GUIDE_LINE_OFFSET; row < rows; row += MAJOR_GRID_STEP) {
+      const y = row * cellSize + majorGuideOffset;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+    }
+
+    for (let col = MAJOR_GUIDE_LINE_OFFSET; col < cols; col += MAJOR_GRID_STEP) {
+      const x = col * cellSize + majorGuideOffset;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (showOutline) {
+    ctx.save();
+    ctx.strokeStyle = showMajorGrid ? MAJOR_GRID_STROKE : BOARD_OUTLINE_STROKE;
+    ctx.lineWidth = Math.max(2, Math.floor(cellSize / 5));
+    ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+    ctx.restore();
+  }
+
+  const drawCellOverlay = (cellIndex: number, fill: string, stroke: string, strokeScale: number) => {
+    if (cellIndex < 0 || cellIndex >= rows * cols) {
+      return;
+    }
+
+    const row = Math.floor(cellIndex / cols);
+    const col = cellIndex % cols;
+    const x = col * cellSize;
+    const y = row * cellSize;
+
+    ctx.save();
+    ctx.fillStyle = fill;
+    ctx.fillRect(x + 1, y + 1, Math.max(cellSize - 2, 1), Math.max(cellSize - 2, 1));
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = Math.max(2, cellSize / strokeScale);
+    ctx.strokeRect(x + 1, y + 1, Math.max(cellSize - 2, 1), Math.max(cellSize - 2, 1));
+    ctx.restore();
+  };
+
+  if (hoverCellIndex !== null) {
+    drawCellOverlay(hoverCellIndex, "rgba(31, 123, 255, 0.12)", "rgba(31, 123, 255, 0.95)", 5.5);
+  }
+
+  if (flashCellIndex !== null) {
+    drawCellOverlay(flashCellIndex, "rgba(255, 170, 84, 0.16)", "rgba(227, 73, 54, 0.95)", 4);
+  }
+};
+
+const downloadFile = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+};
+
+function App() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const boardScrollRef = useRef<HTMLDivElement | null>(null);
+  const boardShellRef = useRef<HTMLDivElement | null>(null);
+  const boardAutoFitSignatureRef = useRef<string | null>(null);
+  const pendingBoardZoomAnchorRef = useRef<BoardZoomAnchor | null>(null);
+  const colorLabPanelRef = useRef<HTMLElement | null>(null);
+  const dragPaintedRef = useRef<number | null>(null);
+  const paintFlashTimeoutRef = useRef<number | null>(null);
+  const floatingDragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
+  const floatingResizeRef = useRef<{
+    startX: number;
+    startY: number;
+    startWidth: number;
+    startHeight: number;
+    pointerId: number;
+  } | null>(null);
+  const [scale, setScale] = useState(14);
+  const [hasManualScale, setHasManualScale] = useState(false);
+  const [boardViewportWidth, setBoardViewportWidth] = useState(0);
+  const [hoverCellIndex, setHoverCellIndex] = useState<number | null>(null);
+  const [flashCellIndex, setFlashCellIndex] = useState<number | null>(null);
+  const [showSavePanel, setShowSavePanel] = useState(true);
+  const [showMajorGrid, setShowMajorGrid] = useState(true);
+  const [exportMinorGrid, setExportMinorGrid] = useState(false);
+  const [exportMajorGrid, setExportMajorGrid] = useState(false);
+  const [isColorLabFloating, setIsColorLabFloating] = useState(false);
+  const [floatingColorLabPosition, setFloatingColorLabPosition] = useState<FloatingPanelPosition>(
+    createDefaultFloatingPosition
+  );
+  const [floatingColorLabSize, setFloatingColorLabSize] = useState<FloatingPanelSize>({
+    width: FLOATING_COLOR_PANEL_WIDTH,
+    height: FLOATING_COLOR_PANEL_HEIGHT
+  });
+  const [colorSearchQuery, setColorSearchQuery] = useState("");
+  const [paletteSearchQuery, setPaletteSearchQuery] = useState("");
+  const [selectedBrandId, setSelectedBrandId] = useState("all");
+  const [selectedCodeGroup, setSelectedCodeGroup] = useState("all");
+  const [colorPage, setColorPage] = useState(0);
+  const [compareMode, setCompareMode] = useState(false);
+
+  const {
+    name,
+    rows,
+    cols,
+    cells,
+    customPalettes,
+    paletteId,
+    selectedColorId,
+    tool,
+    customBoard,
+    history,
+    future,
+    applyCell,
+    setPalette,
+    setTool,
+    setSelectedColor,
+    setProjectName,
+    setCustomBoardField,
+    resizeBoard,
+    resetBoard,
+    undo,
+    redo
+  } = useBeadStore();
+
+  const availablePalettes = useMemo(() => getAllPalettes(customPalettes), [customPalettes]);
+  const colorLookup = useMemo(() => getColorLookup(customPalettes), [customPalettes]);
+  const activePalette = useMemo(
+    () => getPaletteById(paletteId, customPalettes),
+    [customPalettes, paletteId]
+  );
+  const activeColors = activePalette.colors;
+  const selectedColor = colorLookup.get(selectedColorId) ?? activeColors[0];
+
+  const paletteMap = useMemo(
+    () => new Map(availablePalettes.flatMap((palette) => palette.colors.map((color) => [color.id, color.hex] as const))),
+    [availablePalettes]
+  );
+
+  const paletteByColorId = useMemo(
+    () =>
+      new Map(
+        availablePalettes.flatMap((palette) =>
+          palette.colors.map((color) => [color.id, palette] as const)
+        )
+      ),
+    [availablePalettes]
+  );
+
+  const brandOptions = useMemo(() => {
+    const grouped = new Map<string, { id: string; label: string; count: number; aliases: string[] }>();
+    for (const palette of availablePalettes) {
+      const current = grouped.get(palette.brandId);
+      if (current) {
+        current.count += 1;
+      } else {
+        grouped.set(palette.brandId, {
+          id: palette.brandId,
+          label: palette.brandLabel,
+          count: 1,
+          aliases: palette.aliases
+        });
+      }
+    }
+    return [...grouped.values()].sort((left, right) =>
+      left.label.localeCompare(right.label, "zh-Hans-CN")
+    );
+  }, [availablePalettes]);
+
+  const visibleBrandOptions = useMemo(() => {
+    const query = normalizeSearchText(paletteSearchQuery);
+    if (!query) {
+      return brandOptions;
+    }
+
+    const matches = brandOptions.filter((brand) => {
+      const brandHaystack = normalizeSearchText([brand.label, ...brand.aliases].join(" "));
+      if (brandHaystack.includes(query)) {
+        return true;
+      }
+      return availablePalettes.some((palette) => {
+        if (palette.brandId !== brand.id) {
+          return false;
+        }
+        const paletteHaystack = normalizeSearchText(
+          [palette.name, palette.description, ...palette.aliases].join(" ")
+        );
+        return paletteHaystack.includes(query);
+      });
+    });
+
+    if (selectedBrandId !== "all" && !matches.some((brand) => brand.id === selectedBrandId)) {
+      const currentBrand = brandOptions.find((brand) => brand.id === selectedBrandId);
+      if (currentBrand) {
+        return [currentBrand, ...matches];
+      }
+    }
+
+    return matches;
+  }, [availablePalettes, brandOptions, paletteSearchQuery, selectedBrandId]);
+
+  const filteredPalettes = useMemo(() => {
+    const query = normalizeSearchText(paletteSearchQuery);
+    return availablePalettes.filter((palette) => {
+      const matchesBrand = selectedBrandId === "all" || palette.brandId === selectedBrandId;
+      if (!matchesBrand) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      const haystack = normalizeSearchText(
+        [palette.name, palette.brandLabel, palette.description, ...palette.aliases].join(" ")
+      );
+      return haystack.includes(query);
+    });
+  }, [availablePalettes, paletteSearchQuery, selectedBrandId]);
+
+  const getPaletteMatchesQuery = (palette: (typeof availablePalettes)[number]) => {
+    const query = normalizeSearchText(paletteSearchQuery);
+    if (!query) {
+      return true;
+    }
+    const haystack = normalizeSearchText(
+      [palette.name, palette.brandLabel, palette.description, ...palette.aliases].join(" ")
+    );
+    return haystack.includes(query);
+  };
+
+  const colorUsage = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const cell of cells) {
+      if (cell === EMPTY_CELL) {
+        continue;
+      }
+      counts.set(cell, (counts.get(cell) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([colorId, count]) => ({
+        color: colorLookup.get(colorId),
+        count
+      }))
+      .filter((item): item is { color: BeadColor; count: number } => Boolean(item.color))
+      .sort((left, right) => right.count - left.count);
+  }, [cells, colorLookup]);
+
+  const fillCount = useMemo(
+    () => cells.reduce((sum, cell) => sum + (cell === EMPTY_CELL ? 0 : 1), 0),
+    [cells]
+  );
+
+  const commonCanvasPresets = useMemo(
+    () => CANVAS_SELECTION_PRESETS.filter((preset) => Math.max(preset.rows, preset.cols) <= 87),
+    []
+  );
+
+  const filteredColors = useMemo(() => {
+    const query = normalizeSearchText(colorSearchQuery);
+    return activeColors.filter((color) => {
+      const prefix = (color.code.match(/^[A-Za-z]+/) || ["其他"])[0].toUpperCase();
+      if (selectedCodeGroup !== "all" && prefix !== selectedCodeGroup) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      const haystack = normalizeSearchText(
+        [
+          color.code,
+          color.name,
+          color.hex,
+          getRgbLabel(color),
+          color.family ?? "",
+          ...(color.aliases ?? []),
+          ...getColorSearchKeywords(color),
+          activePalette.name,
+          activePalette.brandLabel,
+          ...activePalette.aliases
+        ].join(" ")
+      );
+      return haystack.includes(query);
+    });
+  }, [activeColors, activePalette, colorSearchQuery, selectedCodeGroup]);
+
+  const totalColorPages = Math.max(1, Math.ceil(filteredColors.length / COLOR_PAGE_SIZE));
+  const pagedColors = useMemo(
+    () => filteredColors.slice(colorPage * COLOR_PAGE_SIZE, (colorPage + 1) * COLOR_PAGE_SIZE),
+    [colorPage, filteredColors]
+  );
+
+  const codeGroupOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const color of activeColors) {
+      const prefix = (color.code.match(/^[A-Za-z]+/) || ["其他"])[0].toUpperCase();
+      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([group, count]) => ({ group, count }))
+      .sort((left, right) => left.group.localeCompare(right.group, "en"));
+  }, [activeColors]);
+
+  const closestColors = useMemo(() => {
+    if (!selectedColor) {
+      return [];
+    }
+
+    return [...colorLookup.values()]
+      .filter((color) => color.id !== selectedColor.id)
+      .map((color) => ({
+        color,
+        palette: paletteByColorId.get(color.id),
+        distance: colorDistance(selectedColor, color)
+      }))
+      .sort((left, right) => left.distance - right.distance)
+      .slice(0, 6);
+  }, [colorLookup, paletteByColorId, selectedColor]);
+
+  const boardScale = useMemo(() => clampScale(scale), [scale]);
+
+  const boardRulerSize = useMemo(() => getRulerSize(boardScale), [boardScale]);
+  const boardZoomPercent = useMemo(() => Math.round((boardScale / 14) * 100), [boardScale]);
+  const majorGuideLineWidth = useMemo(() => getMajorGuideLineWidth(boardScale), [boardScale]);
+  const boardSignature = `${rows}x${cols}`;
+
+  const columnNumbers = useMemo(
+    () => Array.from({ length: cols }, (_, index) => index + 1),
+    [cols]
+  );
+
+  const rowNumbers = useMemo(
+    () => Array.from({ length: rows }, (_, index) => index + 1),
+    [rows]
+  );
+
+  const rulerLabelStep = useMemo(() => {
+    if (boardScale >= 18) {
+      return 1;
+    }
+    if (boardScale >= 12) {
+      return 2;
+    }
+    return 5;
+  }, [boardScale]);
+
+  useEffect(() => {
+    setColorPage(0);
+  }, [activePalette.id, selectedBrandId, selectedCodeGroup, paletteSearchQuery, colorSearchQuery]);
+
+  useEffect(() => {
+    if (colorPage > totalColorPages - 1) {
+      setColorPage(totalColorPages - 1);
+    }
+  }, [colorPage, totalColorPages]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const stored = window.localStorage.getItem(FLOATING_COLOR_PANEL_STORAGE_KEY);
+    if (!stored) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored) as Partial<FloatingPanelPosition & FloatingPanelSize> & {
+        floating?: boolean;
+      };
+      if (typeof parsed.floating === "boolean") {
+        setIsColorLabFloating(parsed.floating);
+      }
+      if (typeof parsed.x === "number" && typeof parsed.y === "number") {
+        setFloatingColorLabPosition({ x: parsed.x, y: parsed.y });
+      }
+      if (typeof parsed.width === "number" && typeof parsed.height === "number") {
+        setFloatingColorLabSize(
+          clampFloatingSize({
+            width: parsed.width,
+            height: parsed.height
+          })
+        );
+      }
+    } catch {
+      // Ignore invalid local panel state and keep defaults.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      FLOATING_COLOR_PANEL_STORAGE_KEY,
+      JSON.stringify({
+        floating: isColorLabFloating,
+        x: floatingColorLabPosition.x,
+        y: floatingColorLabPosition.y,
+        width: floatingColorLabSize.width,
+        height: floatingColorLabSize.height
+      })
+    );
+  }, [floatingColorLabPosition, floatingColorLabSize, isColorLabFloating]);
+
+  useEffect(() => {
+    const boardElement = boardScrollRef.current;
+    if (!boardElement) {
+      return;
+    }
+
+    const updateMetrics = () => {
+      const nextViewportWidth = boardElement.clientWidth;
+
+      setBoardViewportWidth((current) => (current === nextViewportWidth ? current : nextViewportWidth));
+    };
+
+    updateMetrics();
+
+    const boardObserver = new ResizeObserver(updateMetrics);
+    boardObserver.observe(boardElement);
+
+    return () => {
+      boardObserver.disconnect();
+    };
+  }, [cols, rows]);
+
+  useEffect(() => {
+    if (!boardViewportWidth) {
+      return;
+    }
+    if (hasManualScale) {
+      return;
+    }
+    if (boardAutoFitSignatureRef.current === boardSignature) {
+      return;
+    }
+
+    const availableWidth = Math.max(0, boardViewportWidth - BOARD_SCROLL_PADDING);
+    const fittedScale = getMaxBoardScaleForWidth(cols, availableWidth);
+    setScale((current) => (current === fittedScale ? current : fittedScale));
+    boardAutoFitSignatureRef.current = boardSignature;
+  }, [boardSignature, boardViewportWidth, cols, hasManualScale]);
+
+  useEffect(() => {
+    setHasManualScale(false);
+  }, [rows, cols]);
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingBoardZoomAnchorRef.current;
+    if (!pendingAnchor) {
+      return;
+    }
+    pendingBoardZoomAnchorRef.current = null;
+
+    const scrollElement = boardScrollRef.current;
+    const shellElement = boardShellRef.current;
+    if (!scrollElement || !shellElement) {
+      return;
+    }
+
+    const scrollRect = scrollElement.getBoundingClientRect();
+    const shellRect = shellElement.getBoundingClientRect();
+    const anchorClientX = shellRect.left + pendingAnchor.anchorX * pendingAnchor.scaleRatio;
+    const anchorClientY = shellRect.top + pendingAnchor.anchorY * pendingAnchor.scaleRatio;
+    const targetClientX = scrollRect.left + pendingAnchor.viewportX;
+    const targetClientY = scrollRect.top + pendingAnchor.viewportY;
+
+    scrollElement.scrollLeft = Math.max(0, scrollElement.scrollLeft + anchorClientX - targetClientX);
+    scrollElement.scrollTop = Math.max(0, scrollElement.scrollTop + anchorClientY - targetClientY);
+  }, [boardScale]);
+
+  useEffect(() => {
+    return () => {
+      if (paintFlashTimeoutRef.current !== null) {
+        window.clearTimeout(paintFlashTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isColorLabFloating) {
+      return;
+    }
+
+    const panel = colorLabPanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    const clampCurrentPanel = () => {
+      const panel = colorLabPanelRef.current;
+      if (!panel) {
+        return;
+      }
+      setFloatingColorLabSize((current) =>
+        clampFloatingSize({
+          width: panel.offsetWidth || current.width,
+          height: panel.offsetHeight || current.height
+        })
+      );
+      setFloatingColorLabPosition((current) =>
+        clampFloatingPosition(current, panel.offsetWidth, panel.offsetHeight)
+      );
+    };
+
+    clampCurrentPanel();
+    const observer = new ResizeObserver(clampCurrentPanel);
+    observer.observe(panel);
+    window.addEventListener("resize", clampCurrentPanel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", clampCurrentPanel);
+    };
+  }, [isColorLabFloating]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    drawBoardToCanvas(canvas, rows, cols, cells, paletteMap, boardScale, {
+      showMinorGrid: true,
+      showMajorGrid,
+      showOutline: false,
+      hoverCellIndex,
+      flashCellIndex
+    });
+  }, [rows, cols, cells, paletteMap, boardScale, showMajorGrid, hoverCellIndex, flashCellIndex]);
+
+  const getCellIndexFromPoint = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return null;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const cellWidth = rect.width / cols;
+    const cellHeight = rect.height / rows;
+    const col = Math.floor(x / cellWidth);
+    const row = Math.floor(y / cellHeight);
+
+    if (col < 0 || col >= cols || row < 0 || row >= rows) {
+      return null;
+    }
+
+    return row * cols + col;
+  };
+
+  const paintFromPoint = (clientX: number, clientY: number) => {
+    const index = getCellIndexFromPoint(clientX, clientY);
+    if (index === null) {
+      return;
+    }
+
+    setHoverCellIndex(index);
+    if (dragPaintedRef.current === index) {
+      return;
+    }
+    dragPaintedRef.current = index;
+    applyCell(index);
+    setFlashCellIndex(index);
+    if (paintFlashTimeoutRef.current !== null) {
+      window.clearTimeout(paintFlashTimeoutRef.current);
+    }
+    paintFlashTimeoutRef.current = window.setTimeout(() => {
+      setFlashCellIndex((current) => (current === index ? null : current));
+    }, 170);
+  };
+
+  const applyManualBoardScale = (nextValue: number, focalPoint?: { x: number; y: number }) => {
+    const nextScale = clampScale(nextValue);
+    setHasManualScale(true);
+
+    const scrollElement = boardScrollRef.current;
+    const shellElement = boardShellRef.current;
+    if (!scrollElement || !shellElement) {
+      pendingBoardZoomAnchorRef.current = null;
+      setScale(nextScale);
+      return;
+    }
+
+    const scrollRect = scrollElement.getBoundingClientRect();
+    const shellRect = shellElement.getBoundingClientRect();
+    const viewportX = focalPoint?.x ?? scrollElement.clientWidth / 2;
+    const viewportY = focalPoint?.y ?? scrollElement.clientHeight / 2;
+    const scaleRatio = boardScale === 0 ? 1 : nextScale / boardScale;
+    const anchorX = scrollRect.left + viewportX - shellRect.left;
+    const anchorY = scrollRect.top + viewportY - shellRect.top;
+
+    pendingBoardZoomAnchorRef.current = {
+      anchorX,
+      anchorY,
+      viewportX,
+      viewportY,
+      scaleRatio
+    };
+    setScale(nextScale);
+  };
+
+  const applySliderBoardScale = (nextValue: number) => {
+    setHasManualScale(true);
+    pendingBoardZoomAnchorRef.current = null;
+    setScale(clampScale(nextValue));
+  };
+
+  const zoomBoardByStep = (delta: number, focalPoint?: { x: number; y: number }) => {
+    applyManualBoardScale(boardScale + delta, focalPoint);
+  };
+
+  const resetBoardScaleToFit = () => {
+    setHasManualScale(false);
+    pendingBoardZoomAnchorRef.current = null;
+    if (!boardViewportWidth) {
+      return;
+    }
+    const availableWidth = Math.max(0, boardViewportWidth - BOARD_SCROLL_PADDING);
+    setScale(getMaxBoardScaleForWidth(cols, availableWidth));
+  };
+
+  const handleBoardWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    zoomBoardByStep(event.deltaY < 0 ? 2 : -2, {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    });
+  };
+
+  const exportImage = async (format: "png" | "jpg") => {
+    const offscreen = document.createElement("canvas");
+    drawBoardToCanvas(offscreen, rows, cols, cells, paletteMap, 32, {
+      showMinorGrid: exportMinorGrid,
+      showMajorGrid: exportMajorGrid,
+      showOutline: exportMinorGrid || exportMajorGrid
+    });
+    const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+    const quality = format === "jpg" ? 0.92 : undefined;
+    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, mimeType, quality));
+    if (!blob) {
+      return;
+    }
+    downloadFile(blob, `${name || "pingdou"}.${format}`);
+  };
+
+  const startFloatingColorLabDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isColorLabFloating) {
+      return;
+    }
+
+    const panel = colorLabPanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    const rect = panel.getBoundingClientRect();
+    floatingDragRef.current = {
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      pointerId: event.pointerId
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveFloatingColorLabDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isColorLabFloating || floatingDragRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const panel = colorLabPanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    setFloatingColorLabPosition(
+      clampFloatingPosition(
+        {
+          x: event.clientX - floatingDragRef.current.offsetX,
+          y: event.clientY - floatingDragRef.current.offsetY
+        },
+        panel.offsetWidth,
+        panel.offsetHeight
+      )
+    );
+  };
+
+  const stopFloatingColorLabDrag = () => {
+    floatingDragRef.current = null;
+  };
+
+  const toggleColorLabFloating = () => {
+    setIsColorLabFloating((current) => {
+      const next = !current;
+      if (next) {
+        const nextSize = clampFloatingSize(floatingColorLabSize);
+        setFloatingColorLabSize(nextSize);
+        setFloatingColorLabPosition((position) =>
+          clampFloatingPosition(position, nextSize.width, nextSize.height)
+        );
+      }
+      return next;
+    });
+  };
+
+  const handleBrandSelection = (brandId: string) => {
+    setSelectedBrandId(brandId);
+    if (brandId === "all") {
+      return;
+    }
+
+    if (activePalette.brandId === brandId) {
+      return;
+    }
+
+    const nextPalette =
+      availablePalettes.find((palette) => palette.brandId === brandId && getPaletteMatchesQuery(palette)) ??
+      availablePalettes.find((palette) => palette.brandId === brandId);
+
+    if (nextPalette) {
+      setPalette(nextPalette.id);
+    }
+  };
+
+  const handlePaletteSelection = (paletteId: string) => {
+    setPalette(paletteId);
+    const nextPalette = availablePalettes.find((palette) => palette.id === paletteId);
+    if (nextPalette) {
+      setSelectedBrandId(nextPalette.brandId);
+    }
+  };
+
+  const resetFloatingColorLabSize = () => {
+    const nextSize = clampFloatingSize({
+      width: FLOATING_COLOR_PANEL_WIDTH,
+      height: FLOATING_COLOR_PANEL_HEIGHT
+    });
+    setFloatingColorLabSize(nextSize);
+    setFloatingColorLabPosition((position) =>
+      clampFloatingPosition(position, nextSize.width, nextSize.height)
+    );
+  };
+
+  const startFloatingColorLabResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!isColorLabFloating) {
+      return;
+    }
+
+    const panel = colorLabPanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    floatingResizeRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: panel.offsetWidth,
+      startHeight: panel.offsetHeight,
+      pointerId: event.pointerId
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+  };
+
+  const moveFloatingColorLabResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!isColorLabFloating || floatingResizeRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const nextSize = clampFloatingSize({
+      width: floatingResizeRef.current.startWidth + (event.clientX - floatingResizeRef.current.startX),
+      height: floatingResizeRef.current.startHeight + (event.clientY - floatingResizeRef.current.startY)
+    });
+
+    setFloatingColorLabSize(nextSize);
+    setFloatingColorLabPosition((position) =>
+      clampFloatingPosition(position, nextSize.width, nextSize.height)
+    );
+  };
+
+  const stopFloatingColorLabResize = () => {
+    floatingResizeRef.current = null;
+  };
+
+  const colorLabPanel = (
+    <section
+      ref={colorLabPanelRef}
+      className={`color-lab ${isColorLabFloating ? "floating" : "docked"}`}
+      style={
+        isColorLabFloating
+          ? {
+              left: `${floatingColorLabPosition.x}px`,
+              top: `${floatingColorLabPosition.y}px`,
+              width: `${floatingColorLabSize.width}px`,
+              height: `${floatingColorLabSize.height}px`
+            }
+          : undefined
+      }
+    >
+      <div
+        className={`color-lab-header ${isColorLabFloating ? "floating" : ""}`}
+        onPointerDown={startFloatingColorLabDrag}
+        onPointerMove={moveFloatingColorLabDrag}
+        onPointerUp={stopFloatingColorLabDrag}
+        onPointerCancel={stopFloatingColorLabDrag}
+      >
+        <div>
+          <div className="section-title-row">
+            <h2>颜色面板</h2>
+            <span>{isColorLabFloating ? "浮动面板" : "固定高频区"}</span>
+          </div>
+        </div>
+        <div className="color-lab-actions" onPointerDown={(event) => event.stopPropagation()}>
+          {isColorLabFloating ? (
+            <button className="panel-mode-button secondary" type="button" onClick={resetFloatingColorLabSize}>
+              重置大小
+            </button>
+          ) : null}
+          {isColorLabFloating ? (
+            <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
+              停靠右侧
+            </button>
+          ) : (
+            <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
+              浮动面板
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="color-lab-body">
+        <div className="selected-color-panel compact">
+          <div className="selected-color-hero compact" style={{ backgroundColor: selectedColor?.hex ?? "#ffffff" }} />
+          <div className="selected-color-copy">
+            <p className="eyebrow">Active Color</p>
+            <h3>{selectedColor ? getColorLabel(selectedColor) : "未选择颜色"}</h3>
+            <div className="selected-meta">
+              <span>{selectedColor?.hex}</span>
+              <span>{selectedColor ? getRgbLabel(selectedColor) : ""}</span>
+            </div>
+            <p className="muted">
+              {activePalette.brandLabel} · {activePalette.name}
+              {selectedColor?.family ? ` · ${selectedColor.family}` : ""}
+            </p>
+            <span className="current-color-badge">当前上色</span>
+          </div>
+        </div>
+
+        <div className="color-toolbar">
+          <div className="search-row">
+            <input
+              className="text-input"
+              value={colorSearchQuery}
+              onChange={(event) => setColorSearchQuery(event.target.value)}
+              placeholder="搜索色号、HEX、RGB、别名、黑色"
+            />
+            <button
+              className={`compare-toggle ${compareMode ? "active" : ""}`}
+              type="button"
+              onClick={() => setCompareMode((current) => !current)}
+            >
+              颜色比对
+            </button>
+          </div>
+
+          <div className="brand-filter-row">
+            <button
+              className={`brand-chip ${selectedBrandId === "all" ? "active" : ""}`}
+              type="button"
+              onClick={() => handleBrandSelection("all")}
+            >
+              全部品牌
+            </button>
+            {visibleBrandOptions.map((brand) => (
+              <button
+                key={brand.id}
+                className={`brand-chip ${selectedBrandId === brand.id ? "active" : ""}`}
+                type="button"
+                onClick={() => handleBrandSelection(brand.id)}
+              >
+                {brand.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="palette-search-row">
+            <input
+              className="text-input"
+              value={paletteSearchQuery}
+              onChange={(event) => setPaletteSearchQuery(event.target.value)}
+              placeholder="搜索品牌 / 色卡"
+            />
+          </div>
+
+          <div className="code-group-row">
+            <button
+              className={`code-group-chip ${selectedCodeGroup === "all" ? "active" : ""}`}
+              type="button"
+              onClick={() => setSelectedCodeGroup("all")}
+            >
+              全部
+            </button>
+            {codeGroupOptions.map((item) => (
+              <button
+                key={item.group}
+                className={`code-group-chip ${selectedCodeGroup === item.group ? "active" : ""}`}
+                type="button"
+                onClick={() => setSelectedCodeGroup(item.group)}
+              >
+                {item.group} <span>{item.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+      {compareMode ? (
+        <div className="compare-panel">
+          <div className="section-head">
+            <h2>近似色比对</h2>
+            <span>跨品牌找接近颜色</span>
+          </div>
+          <div className="compare-list">
+            {closestColors.map(({ color, palette }) => (
+              <button
+                key={color.id}
+                className="compare-item"
+                type="button"
+                onClick={() => {
+                  if (palette) {
+                    setPalette(palette.id);
+                  }
+                  setSelectedColor(color.id);
+                }}
+              >
+                <span className="compare-chip" style={{ backgroundColor: color.hex }} />
+                <div>
+                  <strong>{getColorLabel(color)}</strong>
+                  <p>
+                    {palette?.brandLabel ?? "未分类"} · {palette?.name ?? ""} · {color.hex}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="color-card-grid">
+        {pagedColors.map((color) => (
+          <button
+            key={color.id}
+            className={`color-card ${selectedColorId === color.id ? "selected" : ""}`}
+            type="button"
+            onClick={() => setSelectedColor(color.id)}
+          >
+            <div className="color-card-top" style={{ backgroundColor: color.hex }}>
+              <span>{color.code}</span>
+            </div>
+            <div className="color-card-body">
+              <strong>{getColorLabel(color)}</strong>
+              <p>{color.hex}</p>
+              <p>{getRgbLabel(color)}</p>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {filteredColors.length > 0 ? (
+        <div className="color-page-bar">
+          <div className="color-page-copy">
+            <strong>
+              显示 {Math.min(filteredColors.length, colorPage * COLOR_PAGE_SIZE + 1)}-
+              {Math.min(filteredColors.length, (colorPage + 1) * COLOR_PAGE_SIZE)}
+              {" /"}
+              {filteredColors.length} 色
+            </strong>
+          </div>
+          <div className="color-page-actions">
+            <button
+              className="page-button"
+              type="button"
+              onClick={() => setColorPage((current) => Math.max(0, current - 1))}
+              disabled={colorPage === 0}
+            >
+              上一页
+            </button>
+            <button
+              className="page-button"
+              type="button"
+              onClick={() => setColorPage((current) => Math.min(totalColorPages - 1, current + 1))}
+              disabled={colorPage >= totalColorPages - 1}
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {filteredColors.length === 0 ? (
+        <div className="empty-state compact">这一组色卡里没有命中当前搜索词。</div>
+      ) : null}
+
+      <section className="usage-section compact color-usage-panel">
+        <div className="section-head compact">
+          <h2>颜色统计</h2>
+          <span>{colorUsage.length ? `${fillCount} 颗` : "实时统计"}</span>
+        </div>
+        {colorUsage.length > 0 ? (
+          <div className="usage-grid">
+            {colorUsage.map(({ color, count }) => {
+              const palette = paletteByColorId.get(color.id);
+              return (
+                <div key={color.id} className="usage-card">
+                  <span className="usage-chip" style={{ backgroundColor: color.hex }} />
+                  <div>
+                    <strong>{getColorLabel(color)}</strong>
+                    <p>
+                      {count} 颗 · {palette?.brandLabel ?? ""} {palette ? `· ${palette.name}` : ""}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-state compact">先在画布上放几颗豆子，这里就会开始统计。</div>
+        )}
+      </section>
+      </div>
+
+      {isColorLabFloating ? (
+        <button
+          className="color-lab-resize-handle"
+          type="button"
+          aria-label="拖动调整颜色面板大小"
+          title="拖动调整颜色面板大小"
+          onPointerDown={startFloatingColorLabResize}
+          onPointerMove={moveFloatingColorLabResize}
+          onPointerUp={stopFloatingColorLabResize}
+          onPointerCancel={stopFloatingColorLabResize}
+        />
+      ) : null}
+    </section>
+  );
+
+  return (
+    <div className="app-shell">
+      <section className="workspace-top">
+        <div className="workspace-title">
+          <h2>Cyber 拼豆工坊</h2>
+          <p className="muted">{name}</p>
+        </div>
+        <div className="summary-strip">
+          <div>
+            <strong>{rows} x {cols}</strong>
+          </div>
+          <div>
+            <strong>已上色 {fillCount.toLocaleString()}</strong>
+          </div>
+          <div>
+            <strong>{activePalette.brandLabel} 5mm</strong>
+          </div>
+          <div>
+            <strong>{boardZoomPercent}%</strong>
+          </div>
+          <div className="guide-summary">
+            <strong>5x5 辅助线 {showMajorGrid ? "开" : "关"}</strong>
+          </div>
+        </div>
+        <div className="top-actions">
+          <button className="action-button solid" type="button" onClick={() => exportImage("png")}>
+            导出 PNG
+          </button>
+          <button className="action-button" type="button" onClick={() => exportImage("jpg")}>
+            导出 JPG
+          </button>
+        </div>
+      </section>
+
+      <aside className="sidebar">
+        <div className="tool-rail" aria-label="绘图工具">
+          <button
+            className={`tool-icon-button ${tool === "paint" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTool("paint")}
+            title="上色"
+            aria-label="上色"
+          >
+            画
+          </button>
+          <button
+            className={`tool-icon-button ${tool === "erase" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTool("erase")}
+            title="橡皮擦"
+            aria-label="橡皮擦"
+          >
+            擦
+          </button>
+          <button className="tool-icon-button" type="button" onClick={undo} disabled={history.length === 0} title="撤销">
+            撤
+          </button>
+          <button className="tool-icon-button" type="button" onClick={redo} disabled={future.length === 0} title="重做">
+            重
+          </button>
+          <button className="tool-icon-button danger" type="button" onClick={resetBoard} title="清空画布">
+            清
+          </button>
+          <label className={`tool-icon-toggle ${showMajorGrid ? "active" : ""}`} title="显示 5x5 辅助线">
+            <input
+              type="checkbox"
+              checked={showMajorGrid}
+              onChange={(event) => setShowMajorGrid(event.target.checked)}
+            />
+            <span>线</span>
+          </label>
+          <button className="tool-icon-button" type="button" onClick={() => setShowSavePanel((current) => !current)} title="保存与导出">
+            存
+          </button>
+        </div>
+
+        <div className="control-panel">
+          <div className="panel brand-panel">
+            <p className="eyebrow">Cyber Pingdou</p>
+            <h1>画布与文件</h1>
+            <p className="muted">常用尺寸和导出设置集中在这里</p>
+          </div>
+
+          <div className="panel compact-panel">
+            <label className="label" htmlFor="project-name">
+              作品名称
+            </label>
+            <input
+              id="project-name"
+              className="text-input"
+              value={name}
+              onChange={(event) => setProjectName(event.target.value)}
+              maxLength={40}
+            />
+          </div>
+
+          <div className="panel">
+            <div className="section-head">
+              <h2>画布规格</h2>
+              <span>{rows} x {cols}</span>
+            </div>
+            <div className="preset-section">
+              <p className="preset-section-label">常用尺寸</p>
+              <div className="preset-grid">
+                {commonCanvasPresets.map((preset) => (
+                  <button
+                    key={preset.label}
+                    className={`preset-button ${rows === preset.rows && cols === preset.cols ? "active" : ""}`}
+                    onClick={() => resizeBoard(preset.rows, preset.cols)}
+                    type="button"
+                  >
+                    <span>{preset.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="custom-grid">
+              <label>
+                行
+                <input
+                  className="text-input"
+                  inputMode="numeric"
+                  value={customBoard.rowsInput}
+                  onChange={(event) => setCustomBoardField("rowsInput", event.target.value)}
+                />
+              </label>
+              <label>
+                列
+                <input
+                  className="text-input"
+                  inputMode="numeric"
+                  value={customBoard.colsInput}
+                  onChange={(event) => setCustomBoardField("colsInput", event.target.value)}
+                />
+              </label>
+            </div>
+            <button
+              className="action-button solid"
+              type="button"
+              onClick={() => resizeBoard(Number(customBoard.rowsInput), Number(customBoard.colsInput))}
+            >
+              应用自定义尺寸
+            </button>
+          </div>
+
+          <div className="panel">
+            <div className="section-head">
+              <h2>保存与导出</h2>
+              <span>自动本地保存</span>
+            </div>
+            <button className="panel-toggle block" type="button" onClick={() => setShowSavePanel((current) => !current)}>
+              {showSavePanel ? "收起保存功能" : "展开保存功能"}
+            </button>
+            {showSavePanel ? (
+              <div className="action-stack">
+                <div className="toggle-stack export-options">
+                  <label className="toggle-row">
+                    <input type="checkbox" checked readOnly />
+                    <span>本地自动保存</span>
+                  </label>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={exportMinorGrid}
+                      onChange={(event) => setExportMinorGrid(event.target.checked)}
+                    />
+                    <span>导出保留普通网格</span>
+                  </label>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={exportMajorGrid}
+                      onChange={(event) => setExportMajorGrid(event.target.checked)}
+                    />
+                    <span>导出保留 5x5 辅助线</span>
+                  </label>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </aside>
+
+      <main className="workspace">
+        <section className={`workspace-grid ${isColorLabFloating ? "floating-color-lab" : ""}`}>
+          <div className="workspace-main-column">
+            <section className="board-section">
+              <div className="board-workspace-header">
+                <div className="board-heading">
+                  <div className="board-heading-row">
+                    <h2>拼豆画布</h2>
+                  </div>
+                  <p className="muted">Ctrl/Cmd + 鼠标滚轮缩放画布，放大后直接在画布区滚动查看。</p>
+                </div>
+                <div className="board-mode-actions">
+                  <button className="board-mode-pill" type="button" onClick={resetBoardScaleToFit} title="适应画布">
+                    {rows} × {cols}
+                  </button>
+                  <span className="board-mode-pill active">{tool === "paint" ? "上色模式" : "橡皮模式"}</span>
+                </div>
+              </div>
+              <div className="board-stage">
+                <div
+                  ref={boardScrollRef}
+                  className="board-scroll"
+                  onWheel={handleBoardWheel}
+                  title="Ctrl/Cmd + 鼠标滚轮可缩放画布"
+                >
+                  <div className="board-scroll-content">
+                    <div
+                      ref={boardShellRef}
+                      className="board-shell"
+                      style={{
+                        ["--board-cell-size" as string]: `${boardScale}px`,
+                        ["--board-ruler-size" as string]: `${boardRulerSize}px`,
+                        ["--board-major-guide-width" as string]: `${majorGuideLineWidth}px`,
+                        ["--board-columns" as string]: cols,
+                        ["--board-rows" as string]: rows
+                      }}
+                    >
+                      <div className="board-corner board-corner-top-left" aria-hidden="true" />
+                      <div className="board-ruler board-ruler-top" aria-hidden="true">
+                        {columnNumbers.map((value) => (
+                          <span
+                          key={`top-${value}`}
+                          className={`board-ruler-cell ${showMajorGrid && isMajorGuideValue(value) ? "major" : ""}`}
+                        >
+                            {value === 1 || value % rulerLabelStep === 0 ? value : ""}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="board-ruler board-ruler-left" aria-hidden="true">
+                        {rowNumbers.map((value) => (
+                          <span
+                          key={`left-${value}`}
+                          className={`board-ruler-cell ${showMajorGrid && isMajorGuideValue(value) ? "major" : ""}`}
+                        >
+                            {value === 1 || value % rulerLabelStep === 0 ? value : ""}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="board-frame">
+                        <canvas
+                          ref={canvasRef}
+                          className="board-canvas"
+                          onPointerDown={(event) => {
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                            dragPaintedRef.current = null;
+                            paintFromPoint(event.clientX, event.clientY);
+                          }}
+                          onPointerMove={(event) => {
+                            setHoverCellIndex(getCellIndexFromPoint(event.clientX, event.clientY));
+                            if ((event.buttons & 1) !== 1) {
+                              return;
+                            }
+                            paintFromPoint(event.clientX, event.clientY);
+                          }}
+                          onPointerUp={() => {
+                            dragPaintedRef.current = null;
+                          }}
+                          onPointerCancel={() => {
+                            dragPaintedRef.current = null;
+                            setHoverCellIndex(null);
+                          }}
+                          onPointerLeave={() => {
+                            dragPaintedRef.current = null;
+                            setHoverCellIndex(null);
+                          }}
+                        />
+                      </div>
+                      <div className="board-ruler board-ruler-right" aria-hidden="true">
+                        {rowNumbers.map((value) => (
+                          <span
+                            key={`right-${value}`}
+                            className={`board-ruler-cell ${showMajorGrid && isMajorGuideValue(value) ? "major" : ""}`}
+                          >
+                            {value === 1 || value % rulerLabelStep === 0 ? value : ""}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="board-corner board-corner-top-right" aria-hidden="true" />
+                      <div className="board-ruler board-ruler-bottom" aria-hidden="true">
+                        {columnNumbers.map((value) => (
+                          <span
+                            key={`bottom-${value}`}
+                            className={`board-ruler-cell ${showMajorGrid && isMajorGuideValue(value) ? "major" : ""}`}
+                          >
+                            {value === 1 || value % rulerLabelStep === 0 ? value : ""}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="board-corner board-corner-bottom-left" aria-hidden="true" />
+                      <div className="board-corner board-corner-bottom-right" aria-hidden="true" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="board-zoom-dock">
+                <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(-2)}>
+                  -
+                </button>
+                <div className="zoom-readout">
+                  <strong>{boardZoomPercent}%</strong>
+                  <span>{boardScale}px / 格</span>
+                </div>
+                <label className="zoom-slider" htmlFor="board-scale">
+                  <span>缩放</span>
+                  <input
+                    id="board-scale"
+                    type="range"
+                    min={MIN_SCALE}
+                    max={MAX_SCALE}
+                    value={boardScale}
+                    onChange={(event) => applySliderBoardScale(Number(event.target.value))}
+                  />
+                </label>
+                <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(2)}>
+                  +
+                </button>
+              </div>
+            </section>
+          </div>
+          {isColorLabFloating ? null : colorLabPanel}
+        </section>
+        {isColorLabFloating ? colorLabPanel : null}
+      </main>
+    </div>
+  );
+}
+
+export default App;
+
