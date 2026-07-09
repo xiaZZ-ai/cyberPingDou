@@ -81,6 +81,11 @@ type FloatingPanelSize = {
   height: number;
 };
 
+type ReferenceImage = {
+  name: string;
+  src: string;
+};
+
 type BoardZoomAnchor = {
   anchorX: number;
   anchorY: number;
@@ -95,6 +100,11 @@ const FLOATING_COLOR_PANEL_MIN_WIDTH = 320;
 const FLOATING_COLOR_PANEL_MIN_HEIGHT = 420;
 const FLOATING_COLOR_PANEL_MARGIN = 20;
 const FLOATING_COLOR_PANEL_STORAGE_KEY = "cyber-pingdou:floating-color-panel";
+const REFERENCE_PANEL_WIDTH = 340;
+const REFERENCE_PANEL_HEIGHT = 280;
+const REFERENCE_PANEL_MIN_WIDTH = 220;
+const REFERENCE_PANEL_MIN_HEIGHT = 160;
+const REFERENCE_PANEL_MARGIN = 20;
 
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
   if (typeof window === "undefined") {
@@ -106,6 +116,16 @@ const createDefaultFloatingPosition = (): FloatingPanelPosition => {
       window.innerWidth - FLOATING_COLOR_PANEL_WIDTH - FLOATING_COLOR_PANEL_MARGIN
     ),
     y: 96
+  };
+};
+
+const createDefaultReferencePosition = (): FloatingPanelPosition => {
+  if (typeof window === "undefined") {
+    return { x: 0, y: 112 };
+  }
+  return {
+    x: Math.max(REFERENCE_PANEL_MARGIN, window.innerWidth - REFERENCE_PANEL_WIDTH - REFERENCE_PANEL_MARGIN - 24),
+    y: 112
   };
 };
 
@@ -129,6 +149,26 @@ const clampFloatingPosition = (
   };
 };
 
+const clampReferencePosition = (
+  position: FloatingPanelPosition,
+  panelWidth: number,
+  panelHeight: number
+): FloatingPanelPosition => {
+  if (typeof window === "undefined") {
+    return position;
+  }
+  return {
+    x: Math.min(
+      Math.max(REFERENCE_PANEL_MARGIN, position.x),
+      Math.max(REFERENCE_PANEL_MARGIN, window.innerWidth - panelWidth - REFERENCE_PANEL_MARGIN)
+    ),
+    y: Math.min(
+      Math.max(REFERENCE_PANEL_MARGIN, position.y),
+      Math.max(REFERENCE_PANEL_MARGIN, window.innerHeight - panelHeight - REFERENCE_PANEL_MARGIN)
+    )
+  };
+};
+
 const clampFloatingSize = (size: FloatingPanelSize): FloatingPanelSize => {
   if (typeof window === "undefined") {
     return size;
@@ -141,6 +181,22 @@ const clampFloatingSize = (size: FloatingPanelSize): FloatingPanelSize => {
     height: Math.min(
       Math.max(FLOATING_COLOR_PANEL_MIN_HEIGHT, size.height),
       Math.max(FLOATING_COLOR_PANEL_MIN_HEIGHT, window.innerHeight - FLOATING_COLOR_PANEL_MARGIN * 2)
+    )
+  };
+};
+
+const clampReferenceSize = (size: FloatingPanelSize): FloatingPanelSize => {
+  if (typeof window === "undefined") {
+    return size;
+  }
+  return {
+    width: Math.min(
+      Math.max(REFERENCE_PANEL_MIN_WIDTH, size.width),
+      Math.max(REFERENCE_PANEL_MIN_WIDTH, window.innerWidth - REFERENCE_PANEL_MARGIN * 2)
+    ),
+    height: Math.min(
+      Math.max(REFERENCE_PANEL_MIN_HEIGHT, size.height),
+      Math.max(REFERENCE_PANEL_MIN_HEIGHT, window.innerHeight - REFERENCE_PANEL_MARGIN * 2)
     )
   };
 };
@@ -404,10 +460,20 @@ function App() {
   const boardAutoFitSignatureRef = useRef<string | null>(null);
   const pendingBoardZoomAnchorRef = useRef<BoardZoomAnchor | null>(null);
   const colorLabPanelRef = useRef<HTMLElement | null>(null);
+  const referencePanelRef = useRef<HTMLElement | null>(null);
+  const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const dragPaintedRef = useRef<number | null>(null);
   const paintFlashTimeoutRef = useRef<number | null>(null);
   const floatingDragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
   const floatingResizeRef = useRef<{
+    startX: number;
+    startY: number;
+    startWidth: number;
+    startHeight: number;
+    pointerId: number;
+  } | null>(null);
+  const referenceDragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
+  const referenceResizeRef = useRef<{
     startX: number;
     startY: number;
     startWidth: number;
@@ -431,6 +497,15 @@ function App() {
     width: FLOATING_COLOR_PANEL_WIDTH,
     height: FLOATING_COLOR_PANEL_HEIGHT
   });
+  const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
+  const [isReferenceVisible, setIsReferenceVisible] = useState(false);
+  const [referencePosition, setReferencePosition] = useState<FloatingPanelPosition>(createDefaultReferencePosition);
+  const [referenceSize, setReferenceSize] = useState<FloatingPanelSize>({
+    width: REFERENCE_PANEL_WIDTH,
+    height: REFERENCE_PANEL_HEIGHT
+  });
+  const [referenceOpacity, setReferenceOpacity] = useState(100);
+  const [referenceImageScale, setReferenceImageScale] = useState(100);
   const [colorSearchQuery, setColorSearchQuery] = useState("");
   const [paletteSearchQuery, setPaletteSearchQuery] = useState("");
   const [selectedBrandId, setSelectedBrandId] = useState("all");
@@ -850,6 +925,34 @@ function App() {
   }, [isColorLabFloating]);
 
   useEffect(() => {
+    if (!isReferenceVisible) {
+      return;
+    }
+
+    const clampCurrentPanel = () => {
+      const panel = referencePanelRef.current;
+      if (!panel) {
+        return;
+      }
+      setReferenceSize((current) =>
+        clampReferenceSize({
+          width: panel.offsetWidth || current.width,
+          height: panel.offsetHeight || current.height
+        })
+      );
+      setReferencePosition((current) =>
+        clampReferencePosition(current, panel.offsetWidth, panel.offsetHeight)
+      );
+    };
+
+    clampCurrentPanel();
+    window.addEventListener("resize", clampCurrentPanel);
+    return () => {
+      window.removeEventListener("resize", clampCurrentPanel);
+    };
+  }, [isReferenceVisible]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -956,9 +1059,6 @@ function App() {
   };
 
   const handleBoardWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey && !event.metaKey) {
-      return;
-    }
     event.preventDefault();
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1120,6 +1220,143 @@ function App() {
 
   const stopFloatingColorLabResize = () => {
     floatingResizeRef.current = null;
+  };
+
+  const openReferencePicker = () => {
+    if (referenceImage) {
+      setIsReferenceVisible(true);
+      return;
+    }
+    referenceFileInputRef.current?.click();
+  };
+
+  const replaceReferenceImage = () => {
+    referenceFileInputRef.current?.click();
+  };
+
+  const handleReferenceImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        return;
+      }
+      const nextSize = clampReferenceSize({
+        width: REFERENCE_PANEL_WIDTH,
+        height: REFERENCE_PANEL_HEIGHT
+      });
+      setReferenceImage({
+        name: file.name,
+        src: reader.result
+      });
+      setReferenceSize(nextSize);
+      setReferencePosition(clampReferencePosition(createDefaultReferencePosition(), nextSize.width, nextSize.height));
+      setReferenceOpacity(100);
+      setReferenceImageScale(100);
+      setIsReferenceVisible(true);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleReferenceImageWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const delta = event.deltaY < 0 ? 10 : -10;
+    setReferenceImageScale((current) => Math.max(100, Math.min(400, current + delta)));
+  };
+
+  const startReferencePanelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const panel = referencePanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    const rect = panel.getBoundingClientRect();
+    referenceDragRef.current = {
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      pointerId: event.pointerId
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveReferencePanelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (referenceDragRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const panel = referencePanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    setReferencePosition(
+      clampReferencePosition(
+        {
+          x: event.clientX - referenceDragRef.current.offsetX,
+          y: event.clientY - referenceDragRef.current.offsetY
+        },
+        panel.offsetWidth,
+        panel.offsetHeight
+      )
+    );
+  };
+
+  const stopReferencePanelDrag = () => {
+    referenceDragRef.current = null;
+  };
+
+  const startReferencePanelResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const panel = referencePanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    referenceResizeRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: panel.offsetWidth,
+      startHeight: panel.offsetHeight,
+      pointerId: event.pointerId
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+  };
+
+  const moveReferencePanelResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (referenceResizeRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const nextSize = clampReferenceSize({
+      width: referenceResizeRef.current.startWidth + (event.clientX - referenceResizeRef.current.startX),
+      height: referenceResizeRef.current.startHeight + (event.clientY - referenceResizeRef.current.startY)
+    });
+
+    setReferenceSize(nextSize);
+    setReferencePosition((position) => clampReferencePosition(position, nextSize.width, nextSize.height));
+  };
+
+  const stopReferencePanelResize = () => {
+    referenceResizeRef.current = null;
+  };
+
+  const resetReferencePanel = () => {
+    const nextSize = clampReferenceSize({
+      width: REFERENCE_PANEL_WIDTH,
+      height: REFERENCE_PANEL_HEIGHT
+    });
+    setReferenceSize(nextSize);
+    setReferencePosition(clampReferencePosition(createDefaultReferencePosition(), nextSize.width, nextSize.height));
+    setReferenceOpacity(100);
+    setReferenceImageScale(100);
+    setIsReferenceVisible(Boolean(referenceImage));
   };
 
   const colorLabPanel = (
@@ -1291,13 +1528,16 @@ function App() {
             key={color.id}
             className={`color-card ${selectedColorId === color.id ? "selected" : ""}`}
             type="button"
+            title={getColorLabel(color)}
+            aria-label={`选择颜色 ${getColorLabel(color)}`}
             onClick={() => setSelectedColor(color.id)}
           >
             <div className="color-card-top" style={{ backgroundColor: color.hex }}>
               <span>{color.code}</span>
             </div>
             <div className="color-card-body">
-              <strong>{getColorLabel(color)}</strong>
+              <strong>{color.code}</strong>
+              <p>{color.name && color.name !== color.code ? color.name : color.hex}</p>
               <p>{color.hex}</p>
               <p>{getRgbLabel(color)}</p>
             </div>
@@ -1340,32 +1580,6 @@ function App() {
         <div className="empty-state compact">这一组色卡里没有命中当前搜索词。</div>
       ) : null}
 
-      <section className="usage-section compact color-usage-panel">
-        <div className="section-head compact">
-          <h2>颜色统计</h2>
-          <span>{colorUsage.length ? `${fillCount} 颗` : "实时统计"}</span>
-        </div>
-        {colorUsage.length > 0 ? (
-          <div className="usage-grid">
-            {colorUsage.map(({ color, count }) => {
-              const palette = paletteByColorId.get(color.id);
-              return (
-                <div key={color.id} className="usage-card">
-                  <span className="usage-chip" style={{ backgroundColor: color.hex }} />
-                  <div>
-                    <strong>{getColorLabel(color)}</strong>
-                    <p>
-                      {count} 颗 · {palette?.brandLabel ?? ""} {palette ? `· ${palette.name}` : ""}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="empty-state compact">先在画布上放几颗豆子，这里就会开始统计。</div>
-        )}
-      </section>
       </div>
 
       {isColorLabFloating ? (
@@ -1383,8 +1597,129 @@ function App() {
     </section>
   );
 
+  const colorUsagePanel = (
+    <section className="usage-section color-usage-panel board-usage-panel">
+      <div className="section-head compact">
+        <h2>颜色统计</h2>
+        <span>{colorUsage.length ? `${fillCount} 颗` : "实时统计"}</span>
+      </div>
+      {colorUsage.length > 0 ? (
+        <div className="usage-grid">
+          {colorUsage.map(({ color, count }) => {
+            const palette = paletteByColorId.get(color.id);
+            return (
+              <div key={color.id} className="usage-card">
+                <span className="usage-chip" style={{ backgroundColor: color.hex }} />
+                <div>
+                  <strong>{getColorLabel(color)}</strong>
+                  <p>
+                    {count} 颗 · {palette?.brandLabel ?? ""} {palette ? `· ${palette.name}` : ""}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state compact">先在画布上放几颗豆子，这里就会开始统计。</div>
+      )}
+    </section>
+  );
+
+  const referencePanel =
+    referenceImage && isReferenceVisible ? (
+      <section
+        ref={referencePanelRef}
+        className="reference-panel"
+        style={{
+          left: `${referencePosition.x}px`,
+          top: `${referencePosition.y}px`,
+          width: `${referenceSize.width}px`,
+          height: `${referenceSize.height}px`
+        }}
+      >
+        <div
+          className="reference-panel-header"
+          onPointerDown={startReferencePanelDrag}
+          onPointerMove={moveReferencePanelDrag}
+          onPointerUp={stopReferencePanelDrag}
+          onPointerCancel={stopReferencePanelDrag}
+        >
+          <div>
+            <h2>参考图</h2>
+            <p>{referenceImage.name}</p>
+          </div>
+          <div className="reference-panel-actions" onPointerDown={(event) => event.stopPropagation()}>
+            <button className="panel-mode-button secondary" type="button" onClick={replaceReferenceImage}>
+              换图
+            </button>
+            <button className="panel-mode-button secondary" type="button" onClick={resetReferencePanel}>
+              重置
+            </button>
+            <button className="panel-mode-button" type="button" onClick={() => setIsReferenceVisible(false)}>
+              关闭
+            </button>
+          </div>
+        </div>
+        <div className="reference-image-wrap" onWheel={handleReferenceImageWheel}>
+          <div
+            className="reference-image-stage"
+            style={{
+              width: `${referenceImageScale}%`,
+              height: `${referenceImageScale}%`
+            }}
+          >
+            <img
+              src={referenceImage.src}
+              alt="参考图"
+              style={{ opacity: referenceOpacity / 100 }}
+              draggable={false}
+            />
+          </div>
+        </div>
+        <div className="reference-panel-footer">
+          <label className="reference-opacity-control" htmlFor="reference-opacity">
+            <span>透明度</span>
+            <input
+              id="reference-opacity"
+              type="range"
+              min={20}
+              max={100}
+              value={referenceOpacity}
+              onChange={(event) => setReferenceOpacity(Number(event.target.value))}
+            />
+            <strong>{referenceOpacity}%</strong>
+          </label>
+          <div className="reference-zoom-row">
+            <span>滚轮缩放</span>
+            <strong>{referenceImageScale}%</strong>
+            <button className="panel-mode-button secondary" type="button" onClick={() => setReferenceImageScale(100)}>
+              还原
+            </button>
+          </div>
+        </div>
+        <button
+          className="reference-resize-handle"
+          type="button"
+          aria-label="拖动调整参考图大小"
+          title="拖动调整参考图大小"
+          onPointerDown={startReferencePanelResize}
+          onPointerMove={moveReferencePanelResize}
+          onPointerUp={stopReferencePanelResize}
+          onPointerCancel={stopReferencePanelResize}
+        />
+      </section>
+    ) : null;
+
   return (
     <div className="app-shell">
+      <input
+        ref={referenceFileInputRef}
+        className="visually-hidden-input"
+        type="file"
+        accept="image/*"
+        onChange={handleReferenceImageChange}
+      />
       <section className="workspace-top">
         <div className="workspace-title">
           <h2>Cyber 拼豆工坊</h2>
@@ -1418,47 +1753,6 @@ function App() {
       </section>
 
       <aside className="sidebar">
-        <div className="tool-rail" aria-label="绘图工具">
-          <button
-            className={`tool-icon-button ${tool === "paint" ? "active" : ""}`}
-            type="button"
-            onClick={() => setTool("paint")}
-            title="上色"
-            aria-label="上色"
-          >
-            画
-          </button>
-          <button
-            className={`tool-icon-button ${tool === "erase" ? "active" : ""}`}
-            type="button"
-            onClick={() => setTool("erase")}
-            title="橡皮擦"
-            aria-label="橡皮擦"
-          >
-            擦
-          </button>
-          <button className="tool-icon-button" type="button" onClick={undo} disabled={history.length === 0} title="撤销">
-            撤
-          </button>
-          <button className="tool-icon-button" type="button" onClick={redo} disabled={future.length === 0} title="重做">
-            重
-          </button>
-          <button className="tool-icon-button danger" type="button" onClick={resetBoard} title="清空画布">
-            清
-          </button>
-          <label className={`tool-icon-toggle ${showMajorGrid ? "active" : ""}`} title="显示 5x5 辅助线">
-            <input
-              type="checkbox"
-              checked={showMajorGrid}
-              onChange={(event) => setShowMajorGrid(event.target.checked)}
-            />
-            <span>线</span>
-          </label>
-          <button className="tool-icon-button" type="button" onClick={() => setShowSavePanel((current) => !current)} title="保存与导出">
-            存
-          </button>
-        </div>
-
         <div className="control-panel">
           <div className="panel brand-panel">
             <p className="eyebrow">Cyber Pingdou</p>
@@ -1575,7 +1869,6 @@ function App() {
                   <div className="board-heading-row">
                     <h2>拼豆画布</h2>
                   </div>
-                  <p className="muted">Ctrl/Cmd + 鼠标滚轮缩放画布，放大后直接在画布区滚动查看。</p>
                 </div>
                 <div className="board-mode-actions">
                   <button className="board-mode-pill" type="button" onClick={resetBoardScaleToFit} title="适应画布">
@@ -1584,12 +1877,98 @@ function App() {
                   <span className="board-mode-pill active">{tool === "paint" ? "上色模式" : "橡皮模式"}</span>
                 </div>
               </div>
+              <div className="canvas-toolbar" aria-label="画布高频工具栏">
+                <div className="canvas-toolbar-group" role="group" aria-label="绘图工具">
+                  <button
+                    className={`canvas-tool-button ${tool === "paint" ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setTool("paint")}
+                    aria-pressed={tool === "paint"}
+                  >
+                    画笔
+                  </button>
+                  <button
+                    className={`canvas-tool-button ${tool === "erase" ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setTool("erase")}
+                    aria-pressed={tool === "erase"}
+                  >
+                    橡皮
+                  </button>
+                </div>
+                <div className="canvas-toolbar-group" role="group" aria-label="历史与清空">
+                  <button
+                    className="canvas-tool-button"
+                    type="button"
+                    onClick={undo}
+                    disabled={history.length === 0}
+                  >
+                    撤销
+                  </button>
+                  <button
+                    className="canvas-tool-button"
+                    type="button"
+                    onClick={redo}
+                    disabled={future.length === 0}
+                  >
+                    重做
+                  </button>
+                  <button className="canvas-tool-button danger" type="button" onClick={resetBoard}>
+                    清空
+                  </button>
+                </div>
+                <label className={`canvas-tool-toggle ${showMajorGrid ? "active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={showMajorGrid}
+                    onChange={(event) => setShowMajorGrid(event.target.checked)}
+                  />
+                  <span>5x5 线</span>
+                </label>
+                <div className="canvas-current-color">
+                  <span className="canvas-color-chip" style={{ backgroundColor: selectedColor?.hex ?? "#ffffff" }} />
+                  <div>
+                    <strong>{selectedColor ? getColorLabel(selectedColor) : "未选颜色"}</strong>
+                    <span>{selectedColor?.hex ?? ""}</span>
+                  </div>
+                </div>
+                <div className="canvas-zoom-control" role="group" aria-label="画布缩放">
+                  <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(-2)} aria-label="缩小画布">
+                    -
+                  </button>
+                  <label className="zoom-slider compact" htmlFor="canvas-board-scale">
+                    <span>缩放</span>
+                    <input
+                      id="canvas-board-scale"
+                      type="range"
+                      min={MIN_SCALE}
+                      max={MAX_SCALE}
+                      value={boardScale}
+                      onChange={(event) => applySliderBoardScale(Number(event.target.value))}
+                    />
+                  </label>
+                  <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(2)} aria-label="放大画布">
+                    +
+                  </button>
+                  <button className="zoom-action" type="button" onClick={resetBoardScaleToFit}>
+                    适应
+                  </button>
+                  <div className="zoom-readout compact">
+                    <strong>{boardZoomPercent}%</strong>
+                    <span>{boardScale}px / 格</span>
+                  </div>
+                </div>
+                <span className="canvas-toolbar-spacer" aria-hidden="true" />
+                <button className="canvas-tool-button reference" type="button" onClick={openReferencePicker}>
+                  {referenceImage ? "显示参考图" : "上传参考图"}
+                </button>
+              </div>
               <div className="board-stage">
                 <div
                   ref={boardScrollRef}
                   className="board-scroll"
                   onWheel={handleBoardWheel}
-                  title="Ctrl/Cmd + 鼠标滚轮可缩放画布"
+                  title="鼠标滚轮缩放画布"
                 >
                   <div className="board-scroll-content">
                     <div
@@ -1680,34 +2059,13 @@ function App() {
                   </div>
                 </div>
               </div>
-              <div className="board-zoom-dock">
-                <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(-2)}>
-                  -
-                </button>
-                <div className="zoom-readout">
-                  <strong>{boardZoomPercent}%</strong>
-                  <span>{boardScale}px / 格</span>
-                </div>
-                <label className="zoom-slider" htmlFor="board-scale">
-                  <span>缩放</span>
-                  <input
-                    id="board-scale"
-                    type="range"
-                    min={MIN_SCALE}
-                    max={MAX_SCALE}
-                    value={boardScale}
-                    onChange={(event) => applySliderBoardScale(Number(event.target.value))}
-                  />
-                </label>
-                <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(2)}>
-                  +
-                </button>
-              </div>
             </section>
+            {colorUsagePanel}
           </div>
           {isColorLabFloating ? null : colorLabPanel}
         </section>
         {isColorLabFloating ? colorLabPanel : null}
+        {referencePanel}
       </main>
     </div>
   );

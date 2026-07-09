@@ -108,7 +108,7 @@ const extractedPalettes: BeadPalette[] = pixmPaletteData.map((palette) => {
 });
 
 const starterPalette: BeadPalette = {
-  ...createPalette("starter-12", "Starter-12", "兼容当前项目的基础色卡", "#ffb347", legacyPalette),
+  ...createPalette("starter-12", "内置-12", "兼容当前项目的基础色卡", "#ffb347", legacyPalette),
   brandId: "starter",
   brandLabel: "内置",
   aliases: ["基础色卡", "默认色卡", "Starter"],
