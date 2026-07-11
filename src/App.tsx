@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLayoutEffect } from "react";
 
 import {
@@ -9,8 +9,15 @@ import {
   getPaletteById
 } from "./constants";
 import { normalizeSearchText } from "./palette-utils";
+import {
+  deleteSavedProject,
+  getSavedProject,
+  listSavedProjects,
+  saveProjectToLibrary
+} from "./project-library";
 import { useBeadStore } from "./store";
-import type { BeadColor } from "./types";
+import type { BeadColor, ProjectData } from "./types";
+import type { SavedProjectRecord } from "./project-library";
 
 const MIN_SCALE = 8;
 const MAX_SCALE = 40;
@@ -105,6 +112,8 @@ const REFERENCE_PANEL_HEIGHT = 280;
 const REFERENCE_PANEL_MIN_WIDTH = 220;
 const REFERENCE_PANEL_MIN_HEIGHT = 160;
 const REFERENCE_PANEL_MARGIN = 20;
+const ACTIVE_LIBRARY_PROJECT_STORAGE_KEY = "cyber-pingdou:active-library-project";
+const PROJECT_THUMBNAIL_MAX_SIZE = 168;
 
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
   if (typeof window === "undefined") {
@@ -453,6 +462,47 @@ const downloadFile = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
+const createBlankProject = (
+  rows: number,
+  cols: number,
+  paletteId: string,
+  selectedColorId: string
+): ProjectData => ({
+  version: 1,
+  name: "未命名作品",
+  rows,
+  cols,
+  paletteId,
+  selectedColorId,
+  cells: Array.from({ length: rows * cols }, () => EMPTY_CELL),
+  updatedAt: new Date().toISOString()
+});
+
+const createProjectThumbnailDataUrl = (project: ProjectData, paletteMap: Map<string, string>) => {
+  const canvas = document.createElement("canvas");
+  const longestSide = Math.max(project.rows, project.cols, 1);
+  const cellSize = Math.max(2, Math.min(6, Math.floor(PROJECT_THUMBNAIL_MAX_SIZE / longestSide)));
+  drawBoardToCanvas(canvas, project.rows, project.cols, project.cells, paletteMap, cellSize, {
+    showMinorGrid: false,
+    showMajorGrid: false,
+    showOutline: false
+  });
+  return canvas.toDataURL("image/png");
+};
+
+const formatProjectTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "刚刚";
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+};
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const boardScrollRef = useRef<HTMLDivElement | null>(null);
@@ -512,6 +562,18 @@ function App() {
   const [selectedCodeGroup, setSelectedCodeGroup] = useState("all");
   const [colorPage, setColorPage] = useState(0);
   const [compareMode, setCompareMode] = useState(false);
+  const [savedProjects, setSavedProjects] = useState<SavedProjectRecord[]>([]);
+  const [activeLibraryProjectId, setActiveLibraryProjectId] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return window.localStorage.getItem(ACTIVE_LIBRARY_PROJECT_STORAGE_KEY);
+  });
+  const [projectLibraryMessage, setProjectLibraryMessage] = useState("作品库保存在当前浏览器");
+  const [isProjectLibraryOpen, setIsProjectLibraryOpen] = useState(false);
+  const [editingLibraryProjectId, setEditingLibraryProjectId] = useState<string | null>(null);
+  const [editingLibraryProjectName, setEditingLibraryProjectName] = useState("");
+  const [projectLibrarySearchQuery, setProjectLibrarySearchQuery] = useState("");
 
   const {
     name,
@@ -534,7 +596,9 @@ function App() {
     resizeBoard,
     resetBoard,
     undo,
-    redo
+    redo,
+    exportProject,
+    importProject
   } = useBeadStore();
 
   const availablePalettes = useMemo(() => getAllPalettes(customPalettes), [customPalettes]);
@@ -663,6 +727,24 @@ function App() {
     [cells]
   );
 
+  const activeLibraryProject = useMemo(
+    () => savedProjects.find((project) => project.id === activeLibraryProjectId) ?? null,
+    [activeLibraryProjectId, savedProjects]
+  );
+
+  const filteredSavedProjects = useMemo(() => {
+    const query = normalizeSearchText(projectLibrarySearchQuery);
+    if (!query) {
+      return savedProjects;
+    }
+    return savedProjects.filter((project) => {
+      const haystack = normalizeSearchText(
+        [project.name, `${project.rows}x${project.cols}`, `${project.rows} x ${project.cols}`].join(" ")
+      );
+      return haystack.includes(query);
+    });
+  }, [projectLibrarySearchQuery, savedProjects]);
+
   const commonCanvasPresets = useMemo(
     () => CANVAS_SELECTION_PRESETS.filter((preset) => Math.max(preset.rows, preset.cols) <= 87),
     []
@@ -755,6 +837,44 @@ function App() {
     }
     return 5;
   }, [boardScale]);
+
+  const refreshProjectLibrary = useCallback(async () => {
+    try {
+      setSavedProjects(await listSavedProjects());
+    } catch {
+      setProjectLibraryMessage("作品库读取失败，请确认浏览器允许本地存储");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshProjectLibrary();
+  }, [refreshProjectLibrary]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (activeLibraryProjectId) {
+      window.localStorage.setItem(ACTIVE_LIBRARY_PROJECT_STORAGE_KEY, activeLibraryProjectId);
+    } else {
+      window.localStorage.removeItem(ACTIVE_LIBRARY_PROJECT_STORAGE_KEY);
+    }
+  }, [activeLibraryProjectId]);
+
+  useEffect(() => {
+    if (!isProjectLibraryOpen) {
+      return;
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsProjectLibraryOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isProjectLibraryOpen]);
 
   useEffect(() => {
     setColorPage(0);
@@ -1082,6 +1202,149 @@ function App() {
       return;
     }
     downloadFile(blob, `${name || "pingdou"}.${format}`);
+  };
+
+  const saveCurrentProjectToLibrary = async () => {
+    try {
+      const currentProject = exportProject();
+      const savedProject = await saveProjectToLibrary(
+        {
+          ...currentProject,
+          thumbnailDataUrl: createProjectThumbnailDataUrl(currentProject, paletteMap)
+        },
+        activeLibraryProjectId ?? undefined
+      );
+      setActiveLibraryProjectId(savedProject.id);
+      setProjectLibraryMessage("已保存到作品库");
+      await refreshProjectLibrary();
+    } catch {
+      setProjectLibraryMessage("保存失败，请确认浏览器允许本地存储");
+    }
+  };
+
+  const saveCurrentProjectAsNew = async () => {
+    try {
+      const currentProject = exportProject();
+      const savedProject = await saveProjectToLibrary({
+        ...currentProject,
+        name: `${currentProject.name || "未命名作品"} 副本`,
+        thumbnailDataUrl: createProjectThumbnailDataUrl(currentProject, paletteMap)
+      });
+      setActiveLibraryProjectId(savedProject.id);
+      setProjectLibraryMessage("已另存为新作品");
+      await refreshProjectLibrary();
+    } catch {
+      setProjectLibraryMessage("另存失败，请确认浏览器允许本地存储");
+    }
+  };
+
+  const createNewBlankProject = () => {
+    importProject(createBlankProject(rows, cols, paletteId, selectedColorId));
+    setActiveLibraryProjectId(null);
+    setProjectLibraryMessage("已新建空白作品，记得保存到作品库");
+    setIsProjectLibraryOpen(false);
+  };
+
+  const openLibraryProject = async (projectId: string) => {
+    try {
+      const project = await getSavedProject(projectId);
+      if (!project) {
+        setProjectLibraryMessage("这个作品不存在或已被删除");
+        await refreshProjectLibrary();
+        return;
+      }
+      importProject(project);
+      setActiveLibraryProjectId(project.id);
+      setProjectLibraryMessage("已打开作品");
+      setIsProjectLibraryOpen(false);
+    } catch {
+      setProjectLibraryMessage("打开失败，请确认浏览器允许本地存储");
+    }
+  };
+
+  const duplicateLibraryProject = async (projectId: string) => {
+    try {
+      const project = await getSavedProject(projectId);
+      if (!project) {
+        setProjectLibraryMessage("这个作品不存在或已被删除");
+        await refreshProjectLibrary();
+        return;
+      }
+      const { id: _id, createdAt: _createdAt, ...projectData } = project;
+      await saveProjectToLibrary({
+        ...projectData,
+        name: `${project.name || "未命名作品"} 副本`,
+        thumbnailDataUrl:
+          project.thumbnailDataUrl ?? createProjectThumbnailDataUrl(project, paletteMap)
+      });
+      setProjectLibraryMessage("已复制作品");
+      await refreshProjectLibrary();
+    } catch {
+      setProjectLibraryMessage("复制失败，请确认浏览器允许本地存储");
+    }
+  };
+
+  const startRenameLibraryProject = (project: SavedProjectRecord) => {
+    setEditingLibraryProjectId(project.id);
+    setEditingLibraryProjectName(project.name || "未命名作品");
+  };
+
+  const cancelRenameLibraryProject = () => {
+    setEditingLibraryProjectId(null);
+    setEditingLibraryProjectName("");
+  };
+
+  const renameLibraryProject = async (projectId: string) => {
+    const nextName = editingLibraryProjectName.trim() || "未命名作品";
+
+    try {
+      const existingProject = await getSavedProject(projectId);
+      const project =
+        activeLibraryProjectId === projectId ? exportProject() : existingProject;
+      if (!project) {
+        setProjectLibraryMessage("这个作品不存在或已被删除");
+        await refreshProjectLibrary();
+        return;
+      }
+
+      await saveProjectToLibrary(
+        {
+          ...project,
+          name: nextName,
+          thumbnailDataUrl:
+            activeLibraryProjectId === projectId
+              ? createProjectThumbnailDataUrl(project, paletteMap)
+              : existingProject?.thumbnailDataUrl ?? createProjectThumbnailDataUrl(project, paletteMap)
+        },
+        projectId
+      );
+      if (activeLibraryProjectId === projectId) {
+        setProjectName(nextName);
+      }
+      setProjectLibraryMessage("已修改作品名");
+      cancelRenameLibraryProject();
+      await refreshProjectLibrary();
+    } catch {
+      setProjectLibraryMessage("改名失败，请确认浏览器允许本地存储");
+    }
+  };
+
+  const deleteLibraryProject = async (projectId: string) => {
+    const project = savedProjects.find((item) => item.id === projectId);
+    if (!window.confirm(`删除「${project?.name || "未命名作品"}」？此操作只删除当前浏览器里的本地草稿。`)) {
+      return;
+    }
+
+    try {
+      await deleteSavedProject(projectId);
+      if (activeLibraryProjectId === projectId) {
+        setActiveLibraryProjectId(null);
+      }
+      setProjectLibraryMessage("已删除作品");
+      await refreshProjectLibrary();
+    } catch {
+      setProjectLibraryMessage("删除失败，请确认浏览器允许本地存储");
+    }
   };
 
   const startFloatingColorLabDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1711,8 +1974,155 @@ function App() {
       </section>
     ) : null;
 
+  const projectLibraryModal = isProjectLibraryOpen ? (
+    <div
+      className="project-library-modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          setIsProjectLibraryOpen(false);
+        }
+      }}
+    >
+      <section className="project-library-modal" role="dialog" aria-modal="true" aria-labelledby="project-library-title">
+        <div className="project-library-modal-header">
+          <div>
+            <p className="eyebrow">Local Library</p>
+            <h2 id="project-library-title">本地作品库</h2>
+            <p>草稿只保存在当前浏览器，不会上传服务器。</p>
+          </div>
+          <button
+            className="project-library-close"
+            type="button"
+            onClick={() => setIsProjectLibraryOpen(false)}
+            aria-label="关闭作品库"
+          >
+            关闭
+          </button>
+        </div>
+
+        <div className="project-library-modal-actions">
+          <button className="action-button solid" type="button" onClick={saveCurrentProjectToLibrary}>
+            保存当前
+          </button>
+          <button className="action-button" type="button" onClick={saveCurrentProjectAsNew}>
+            另存副本
+          </button>
+          <button className="action-button" type="button" onClick={createNewBlankProject}>
+            新建空白
+          </button>
+        </div>
+
+        <div className="project-library-search">
+          <label htmlFor="project-library-search">搜索作品</label>
+          <input
+            id="project-library-search"
+            className="text-input"
+            value={projectLibrarySearchQuery}
+            onChange={(event) => setProjectLibrarySearchQuery(event.target.value)}
+            placeholder="输入作品名或尺寸，比如 58 x 58"
+          />
+        </div>
+
+        <div className="project-library-modal-status">
+          <span>{projectLibraryMessage}</span>
+          <strong>
+            {filteredSavedProjects.length} / {savedProjects.length} 个作品
+          </strong>
+        </div>
+
+        {filteredSavedProjects.length > 0 ? (
+          <div className="project-library-list project-library-list-modal">
+            {filteredSavedProjects.map((project) => (
+              <article
+                key={project.id}
+                className={`project-library-item project-library-modal-item ${
+                  activeLibraryProjectId === project.id ? "active" : ""
+                }`}
+              >
+                <div className="project-library-card-main">
+                  <button
+                    className="project-library-thumbnail"
+                    type="button"
+                    onClick={() => openLibraryProject(project.id)}
+                    aria-label={`打开 ${project.name || "未命名作品"}`}
+                  >
+                    {project.thumbnailDataUrl ? (
+                      <img src={project.thumbnailDataUrl} alt="" />
+                    ) : (
+                      <span>无预览</span>
+                    )}
+                  </button>
+                  {editingLibraryProjectId === project.id ? (
+                    <form
+                      className="project-library-rename-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void renameLibraryProject(project.id);
+                      }}
+                    >
+                      <label>
+                        <span>作品名</span>
+                        <input
+                          className="text-input"
+                          value={editingLibraryProjectName}
+                          onChange={(event) => setEditingLibraryProjectName(event.target.value)}
+                          maxLength={40}
+                          autoFocus
+                        />
+                      </label>
+                      <div className="project-library-rename-actions">
+                        <button type="submit">保存</button>
+                        <button type="button" onClick={cancelRenameLibraryProject}>
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <button
+                      className="project-library-open"
+                      type="button"
+                      onClick={() => openLibraryProject(project.id)}
+                    >
+                      <strong>{project.name || "未命名作品"}</strong>
+                      <span>
+                        {project.rows} x {project.cols} · {formatProjectTime(project.updatedAt)}
+                      </span>
+                    </button>
+                  )}
+                </div>
+                <div className="project-library-item-actions">
+                  {activeLibraryProjectId === project.id ? <span>当前</span> : null}
+                  <button type="button" onClick={() => openLibraryProject(project.id)}>
+                    打开
+                  </button>
+                  <button type="button" onClick={() => startRenameLibraryProject(project)}>
+                    改名
+                  </button>
+                  <button type="button" onClick={() => duplicateLibraryProject(project.id)}>
+                    复制
+                  </button>
+                  <button type="button" onClick={() => deleteLibraryProject(project.id)}>
+                    删除
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state compact project-library-empty project-library-empty-modal">
+            {savedProjects.length > 0
+              ? "没有找到匹配的作品。换个关键词试试。"
+              : "还没有保存作品。先点“保存当前”，以后就可以在这里切换多个草稿。"}
+          </div>
+        )}
+      </section>
+    </div>
+  ) : null;
+
   return (
     <div className="app-shell">
+      {projectLibraryModal}
       <input
         ref={referenceFileInputRef}
         className="visually-hidden-input"
@@ -1771,6 +2181,28 @@ function App() {
               onChange={(event) => setProjectName(event.target.value)}
               maxLength={40}
             />
+          </div>
+
+          <div className="panel project-library-panel project-library-entry-panel">
+            <div className="section-head">
+              <h2>本地作品库</h2>
+              <span>{savedProjects.length} 个作品</span>
+            </div>
+            <button className="action-button solid project-library-main-button" type="button" onClick={() => setIsProjectLibraryOpen(true)}>
+              打开作品库
+            </button>
+            <p className="project-library-message">{projectLibraryMessage}</p>
+            {activeLibraryProject ? (
+              <div className="project-library-current-card">
+                <span>当前作品</span>
+                <strong>{activeLibraryProject.name || "未命名作品"}</strong>
+                <small>
+                  {activeLibraryProject.rows} x {activeLibraryProject.cols} · {formatProjectTime(activeLibraryProject.updatedAt)}
+                </small>
+              </div>
+            ) : (
+              <p className="project-library-hint">当前画布还没有绑定作品库草稿。</p>
+            )}
           </div>
 
           <div className="panel">
