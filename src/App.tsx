@@ -1,5 +1,21 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLayoutEffect } from "react";
+import {
+  Brush,
+  Download,
+  Eraser,
+  Grid3X3,
+  ImageUp,
+  Maximize2,
+  Minus,
+  PanelRightClose,
+  PanelRightOpen,
+  Plus,
+  Redo2,
+  Search,
+  Trash2,
+  Undo2
+} from "lucide-react";
 
 import {
   CANVAS_SELECTION_PRESETS,
@@ -20,18 +36,18 @@ import type { BeadColor, ProjectData } from "./types";
 import type { SavedProjectRecord } from "./project-library";
 
 const MIN_SCALE = 8;
-const MAX_SCALE = 40;
+const MAX_SCALE = 42;
 const BOARD_SCROLL_PADDING = 28;
 const BOARD_FRAME_EXTRA = 28;
 const clampScale = (value: number) => Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
-const COLOR_PAGE_SIZE = 20;
+const COLOR_PAGE_SIZE = 12;
 const MAJOR_GRID_STEP = 5;
 const MAJOR_GUIDE_LABEL_START = 2;
 const MAJOR_GUIDE_LINE_OFFSET = 1;
 const EMPTY_GRID_STROKE = "#c1c8d1";
 const FILLED_GRID_STROKE = "rgba(118, 126, 137, 0.58)";
 const BOARD_OUTLINE_STROKE = "#ec7b6f";
-const MAJOR_GRID_STROKE = "rgba(236, 84, 69, 0.9)";
+const MAJOR_GRID_STROKE = "rgba(245, 96, 80, 0.62)";
 
 const isMajorGuideValue = (value: number) =>
   value === MAJOR_GUIDE_LABEL_START || (value - MAJOR_GUIDE_LABEL_START) % MAJOR_GRID_STEP === 0;
@@ -114,6 +130,7 @@ const REFERENCE_PANEL_MIN_HEIGHT = 160;
 const REFERENCE_PANEL_MARGIN = 20;
 const ACTIVE_LIBRARY_PROJECT_STORAGE_KEY = "cyber-pingdou:active-library-project";
 const PROJECT_THUMBNAIL_MAX_SIZE = 168;
+const LIBRARY_AUTO_SAVE_DELAY_MS = 700;
 
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
   if (typeof window === "undefined") {
@@ -514,6 +531,7 @@ function App() {
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const dragPaintedRef = useRef<number | null>(null);
   const paintFlashTimeoutRef = useRef<number | null>(null);
+  const skipNextLibraryAutoSaveRef = useRef<string | null>(null);
   const floatingDragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
   const floatingResizeRef = useRef<{
     startX: number;
@@ -746,7 +764,13 @@ function App() {
   }, [projectLibrarySearchQuery, savedProjects]);
 
   const commonCanvasPresets = useMemo(
-    () => CANVAS_SELECTION_PRESETS.filter((preset) => Math.max(preset.rows, preset.cols) <= 87),
+    () =>
+      CANVAS_SELECTION_PRESETS.filter(
+        (preset) =>
+          Math.max(preset.rows, preset.cols) <= 87 &&
+          !(preset.rows === 29 && preset.cols === 29) &&
+          !(preset.rows === 32 && preset.cols === 32)
+      ),
     []
   );
 
@@ -860,6 +884,46 @@ function App() {
       window.localStorage.removeItem(ACTIVE_LIBRARY_PROJECT_STORAGE_KEY);
     }
   }, [activeLibraryProjectId]);
+
+  useEffect(() => {
+    if (!activeLibraryProjectId) {
+      skipNextLibraryAutoSaveRef.current = null;
+      return;
+    }
+
+    if (skipNextLibraryAutoSaveRef.current === activeLibraryProjectId) {
+      skipNextLibraryAutoSaveRef.current = null;
+      return;
+    }
+
+    const project = exportProject();
+    const timeoutId = window.setTimeout(() => {
+      const syncProjectToLibrary = async () => {
+        try {
+          const savedProject = await saveProjectToLibrary(
+            {
+              ...project,
+              thumbnailDataUrl: createProjectThumbnailDataUrl(project, paletteMap)
+            },
+            activeLibraryProjectId
+          );
+          setSavedProjects((currentProjects) => {
+            const nextProjects = [
+              savedProject,
+              ...currentProjects.filter((item) => item.id !== savedProject.id)
+            ];
+            return nextProjects.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+          });
+        } catch {
+          setProjectLibraryMessage("自动同步失败，请确认浏览器允许本地存储");
+        }
+      };
+
+      void syncProjectToLibrary();
+    }, LIBRARY_AUTO_SAVE_DELAY_MS);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [activeLibraryProjectId, cells, cols, exportProject, name, paletteId, paletteMap, rows, selectedColorId]);
 
   useEffect(() => {
     if (!isProjectLibraryOpen) {
@@ -1214,8 +1278,9 @@ function App() {
         },
         activeLibraryProjectId ?? undefined
       );
+      skipNextLibraryAutoSaveRef.current = savedProject.id;
       setActiveLibraryProjectId(savedProject.id);
-      setProjectLibraryMessage("已保存到作品库");
+      setProjectLibraryMessage("已保存到作品库，后续修改会自动同步");
       await refreshProjectLibrary();
     } catch {
       setProjectLibraryMessage("保存失败，请确认浏览器允许本地存储");
@@ -1230,8 +1295,9 @@ function App() {
         name: `${currentProject.name || "未命名作品"} 副本`,
         thumbnailDataUrl: createProjectThumbnailDataUrl(currentProject, paletteMap)
       });
+      skipNextLibraryAutoSaveRef.current = savedProject.id;
       setActiveLibraryProjectId(savedProject.id);
-      setProjectLibraryMessage("已另存为新作品");
+      setProjectLibraryMessage("已另存为新作品，后续修改会自动同步");
       await refreshProjectLibrary();
     } catch {
       setProjectLibraryMessage("另存失败，请确认浏览器允许本地存储");
@@ -1253,9 +1319,10 @@ function App() {
         await refreshProjectLibrary();
         return;
       }
+      skipNextLibraryAutoSaveRef.current = project.id;
       importProject(project);
       setActiveLibraryProjectId(project.id);
-      setProjectLibraryMessage("已打开作品");
+      setProjectLibraryMessage("已打开作品，后续修改会自动同步");
       setIsProjectLibraryOpen(false);
     } catch {
       setProjectLibraryMessage("打开失败，请确认浏览器允许本地存储");
@@ -1319,6 +1386,7 @@ function App() {
         projectId
       );
       if (activeLibraryProjectId === projectId) {
+        skipNextLibraryAutoSaveRef.current = projectId;
         setProjectName(nextName);
       }
       setProjectLibraryMessage("已修改作品名");
@@ -1622,6 +1690,46 @@ function App() {
     setIsReferenceVisible(Boolean(referenceImage));
   };
 
+  const saveExportPanel = (
+    <section className="export-panel">
+      <button className="export-panel-header" type="button" onClick={() => setShowSavePanel((current) => !current)}>
+        <span>
+          <Download size={16} aria-hidden="true" />
+          保存与导出
+        </span>
+        <span>{showSavePanel ? "收起" : "展开"}</span>
+      </button>
+      {showSavePanel ? (
+        <div className="export-panel-body">
+          <label className="toggle-row">
+            <input type="checkbox" checked readOnly />
+            <span>本地自动保存</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={exportMinorGrid}
+              onChange={(event) => setExportMinorGrid(event.target.checked)}
+            />
+            <span>导出保留普通网格</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={exportMajorGrid}
+              onChange={(event) => setExportMajorGrid(event.target.checked)}
+            />
+            <span>导出保留 5x5 辅助线</span>
+          </label>
+          <button className="action-button solid export-primary-button" type="button" onClick={() => exportImage("png")}>
+            <Download size={16} aria-hidden="true" />
+            导出 PNG
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+
   const colorLabPanel = (
     <section
       ref={colorLabPanelRef}
@@ -1647,21 +1755,23 @@ function App() {
         <div>
           <div className="section-title-row">
             <h2>颜色面板</h2>
-            <span>{isColorLabFloating ? "浮动面板" : "固定高频区"}</span>
           </div>
         </div>
         <div className="color-lab-actions" onPointerDown={(event) => event.stopPropagation()}>
           {isColorLabFloating ? (
             <button className="panel-mode-button secondary" type="button" onClick={resetFloatingColorLabSize}>
+              <Maximize2 size={14} aria-hidden="true" />
               重置大小
             </button>
           ) : null}
           {isColorLabFloating ? (
             <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
+              <PanelRightClose size={14} aria-hidden="true" />
               停靠右侧
             </button>
           ) : (
             <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
+              <PanelRightOpen size={14} aria-hidden="true" />
               浮动面板
             </button>
           )}
@@ -1688,19 +1798,15 @@ function App() {
 
         <div className="color-toolbar">
           <div className="search-row">
-            <input
-              className="text-input"
-              value={colorSearchQuery}
-              onChange={(event) => setColorSearchQuery(event.target.value)}
-              placeholder="搜索色号、HEX、RGB、别名、黑色"
-            />
-            <button
-              className={`compare-toggle ${compareMode ? "active" : ""}`}
-              type="button"
-              onClick={() => setCompareMode((current) => !current)}
-            >
-              颜色比对
-            </button>
+            <label className="search-field">
+              <Search size={15} aria-hidden="true" />
+              <input
+                className="text-input"
+                value={colorSearchQuery}
+                onChange={(event) => setColorSearchQuery(event.target.value)}
+                placeholder="搜索颜色（名称或代码）"
+              />
+            </label>
           </div>
 
           <div className="brand-filter-row">
@@ -1874,10 +1980,9 @@ function App() {
               <div key={color.id} className="usage-card">
                 <span className="usage-chip" style={{ backgroundColor: color.hex }} />
                 <div>
-                  <strong>{getColorLabel(color)}</strong>
-                  <p>
-                    {count} 颗 · {palette?.brandLabel ?? ""} {palette ? `· ${palette.name}` : ""}
-                  </p>
+                  <strong>{color.code}</strong>
+                  <p>{fillCount > 0 ? `${((count / fillCount) * 100).toFixed(1)}%` : "0.0%"}</p>
+                  <p>{count} 颗{palette ? ` · ${palette.brandLabel}` : ""}</p>
                 </div>
               </div>
             );
@@ -1987,9 +2092,8 @@ function App() {
       <section className="project-library-modal" role="dialog" aria-modal="true" aria-labelledby="project-library-title">
         <div className="project-library-modal-header">
           <div>
-            <p className="eyebrow">Local Library</p>
             <h2 id="project-library-title">本地作品库</h2>
-            <p>草稿只保存在当前浏览器，不会上传服务器。</p>
+            <p>草稿只保存在当前浏览器</p>
           </div>
           <button
             className="project-library-close"
@@ -2020,7 +2124,7 @@ function App() {
             className="text-input"
             value={projectLibrarySearchQuery}
             onChange={(event) => setProjectLibrarySearchQuery(event.target.value)}
-            placeholder="输入作品名或尺寸，比如 58 x 58"
+            placeholder="输入作品名"
           />
         </div>
 
@@ -2154,9 +2258,11 @@ function App() {
         </div>
         <div className="top-actions">
           <button className="action-button solid" type="button" onClick={() => exportImage("png")}>
+            <Download size={16} aria-hidden="true" />
             导出 PNG
           </button>
           <button className="action-button" type="button" onClick={() => exportImage("jpg")}>
+            <Download size={16} aria-hidden="true" />
             导出 JPG
           </button>
         </div>
@@ -2165,12 +2271,7 @@ function App() {
       <aside className="sidebar">
         <div className="control-panel">
           <div className="panel brand-panel">
-            <p className="eyebrow">Cyber Pingdou</p>
             <h1>画布与文件</h1>
-            <p className="muted">常用尺寸和导出设置集中在这里</p>
-          </div>
-
-          <div className="panel compact-panel">
             <label className="label" htmlFor="project-name">
               作品名称
             </label>
@@ -2199,13 +2300,14 @@ function App() {
                 <small>
                   {activeLibraryProject.rows} x {activeLibraryProject.cols} · {formatProjectTime(activeLibraryProject.updatedAt)}
                 </small>
+                <small>修改会自动同步到作品库</small>
               </div>
             ) : (
               <p className="project-library-hint">当前画布还没有绑定作品库草稿。</p>
             )}
           </div>
 
-          <div className="panel">
+          <div className="panel canvas-settings-panel">
             <div className="section-head">
               <h2>画布规格</h2>
               <span>{rows} x {cols}</span>
@@ -2225,6 +2327,7 @@ function App() {
                 ))}
               </div>
             </div>
+            <p className="preset-section-label custom-size-title">自定义尺寸</p>
             <div className="custom-grid">
               <label>
                 行
@@ -2252,42 +2355,6 @@ function App() {
             >
               应用自定义尺寸
             </button>
-          </div>
-
-          <div className="panel">
-            <div className="section-head">
-              <h2>保存与导出</h2>
-              <span>自动本地保存</span>
-            </div>
-            <button className="panel-toggle block" type="button" onClick={() => setShowSavePanel((current) => !current)}>
-              {showSavePanel ? "收起保存功能" : "展开保存功能"}
-            </button>
-            {showSavePanel ? (
-              <div className="action-stack">
-                <div className="toggle-stack export-options">
-                  <label className="toggle-row">
-                    <input type="checkbox" checked readOnly />
-                    <span>本地自动保存</span>
-                  </label>
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={exportMinorGrid}
-                      onChange={(event) => setExportMinorGrid(event.target.checked)}
-                    />
-                    <span>导出保留普通网格</span>
-                  </label>
-                  <label className="toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={exportMajorGrid}
-                      onChange={(event) => setExportMajorGrid(event.target.checked)}
-                    />
-                    <span>导出保留 5x5 辅助线</span>
-                  </label>
-                </div>
-              </div>
-            ) : null}
           </div>
         </div>
       </aside>
@@ -2317,6 +2384,7 @@ function App() {
                     onClick={() => setTool("paint")}
                     aria-pressed={tool === "paint"}
                   >
+                    <Brush size={16} aria-hidden="true" />
                     画笔
                   </button>
                   <button
@@ -2325,6 +2393,7 @@ function App() {
                     onClick={() => setTool("erase")}
                     aria-pressed={tool === "erase"}
                   >
+                    <Eraser size={16} aria-hidden="true" />
                     橡皮
                   </button>
                 </div>
@@ -2335,6 +2404,7 @@ function App() {
                     onClick={undo}
                     disabled={history.length === 0}
                   >
+                    <Undo2 size={16} aria-hidden="true" />
                     撤销
                   </button>
                   <button
@@ -2343,9 +2413,11 @@ function App() {
                     onClick={redo}
                     disabled={future.length === 0}
                   >
+                    <Redo2 size={16} aria-hidden="true" />
                     重做
                   </button>
                   <button className="canvas-tool-button danger" type="button" onClick={resetBoard}>
+                    <Trash2 size={16} aria-hidden="true" />
                     清空
                   </button>
                 </div>
@@ -2355,6 +2427,7 @@ function App() {
                     checked={showMajorGrid}
                     onChange={(event) => setShowMajorGrid(event.target.checked)}
                   />
+                  <Grid3X3 size={15} aria-hidden="true" />
                   <span>5x5 线</span>
                 </label>
                 <div className="canvas-current-color">
@@ -2366,7 +2439,7 @@ function App() {
                 </div>
                 <div className="canvas-zoom-control" role="group" aria-label="画布缩放">
                   <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(-2)} aria-label="缩小画布">
-                    -
+                    <Minus size={16} aria-hidden="true" />
                   </button>
                   <label className="zoom-slider compact" htmlFor="canvas-board-scale">
                     <span>缩放</span>
@@ -2380,9 +2453,10 @@ function App() {
                     />
                   </label>
                   <button className="zoom-button" type="button" onClick={() => zoomBoardByStep(2)} aria-label="放大画布">
-                    +
+                    <Plus size={16} aria-hidden="true" />
                   </button>
                   <button className="zoom-action" type="button" onClick={resetBoardScaleToFit}>
+                    <Maximize2 size={15} aria-hidden="true" />
                     适应
                   </button>
                   <div className="zoom-readout compact">
@@ -2392,6 +2466,7 @@ function App() {
                 </div>
                 <span className="canvas-toolbar-spacer" aria-hidden="true" />
                 <button className="canvas-tool-button reference" type="button" onClick={openReferencePicker}>
+                  <ImageUp size={16} aria-hidden="true" />
                   {referenceImage ? "显示参考图" : "上传参考图"}
                 </button>
               </div>
@@ -2492,13 +2567,18 @@ function App() {
                 </div>
               </div>
             </section>
-            {colorUsagePanel}
           </div>
-          {isColorLabFloating ? null : colorLabPanel}
+          {isColorLabFloating ? null : (
+            <aside className="right-inspector">
+              {colorLabPanel}
+              {saveExportPanel}
+            </aside>
+          )}
         </section>
         {isColorLabFloating ? colorLabPanel : null}
         {referencePanel}
       </main>
+      {colorUsagePanel}
     </div>
   );
 }
