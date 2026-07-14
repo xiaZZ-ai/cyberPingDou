@@ -117,6 +117,13 @@ type BoardZoomAnchor = {
   scaleRatio: number;
 };
 
+type ColorSearchItem = {
+  color: BeadColor;
+  palette: ReturnType<typeof getAllPalettes>[number];
+  sourceCount?: number;
+  sourceLabels?: string[];
+};
+
 const FLOATING_COLOR_PANEL_WIDTH = 380;
 const FLOATING_COLOR_PANEL_HEIGHT = 720;
 const FLOATING_COLOR_PANEL_MIN_WIDTH = 320;
@@ -247,6 +254,17 @@ const getRgbLabel = (color: BeadColor) => color.rgb ?? formatRgb(color.hex);
 
 const getColorLabel = (color: BeadColor) =>
   color.name && color.name !== color.code ? `${color.code} · ${color.name}` : color.code;
+
+const getColorSourceLabel = (item: ColorSearchItem) =>
+  `${item.palette.brandLabel} · ${item.palette.name} · ${item.color.code}`;
+
+const getColorSearchItemTitle = (item: ColorSearchItem) => {
+  const baseTitle = `${getColorLabel(item.color)} · ${item.palette.brandLabel} · ${item.palette.name}`;
+  if (!item.sourceCount || item.sourceCount <= 1 || !item.sourceLabels?.length) {
+    return baseTitle;
+  }
+  return `${baseTitle}\n同色来源 ${item.sourceCount} 个：${item.sourceLabels.join("、")}`;
+};
 
 const getColorSearchKeywords = (color: BeadColor) => {
   const { r, g, b } = hexToRgb(color.hex);
@@ -774,16 +792,31 @@ function App() {
     []
   );
 
-  const filteredColors = useMemo(() => {
+  const colorSearchItems = useMemo(
+    () =>
+      availablePalettes.flatMap((palette) =>
+        palette.colors.map((color) => ({ color, palette }))
+      ),
+    [availablePalettes]
+  );
+
+  const activeColorItems = useMemo(
+    () => activeColors.map((color) => ({ color, palette: activePalette })),
+    [activeColors, activePalette]
+  );
+
+  const filteredColors = useMemo<ColorSearchItem[]>(() => {
     const query = normalizeSearchText(colorSearchQuery);
-    return activeColors.filter((color) => {
-      const prefix = (color.code.match(/^[A-Za-z]+/) || ["其他"])[0].toUpperCase();
-      if (selectedCodeGroup !== "all" && prefix !== selectedCodeGroup) {
-        return false;
-      }
-      if (!query) {
-        return true;
-      }
+    if (!query) {
+      return activeColorItems;
+    }
+
+    const tokens = colorSearchQuery
+      .split(/[\s,，、/]+/)
+      .map((token) => normalizeSearchText(token))
+      .filter(Boolean);
+    const searchTokens = tokens.length ? tokens : [query];
+    const matchedItems = colorSearchItems.filter(({ color, palette }) => {
       const haystack = normalizeSearchText(
         [
           color.code,
@@ -793,14 +826,32 @@ function App() {
           color.family ?? "",
           ...(color.aliases ?? []),
           ...getColorSearchKeywords(color),
-          activePalette.name,
-          activePalette.brandLabel,
-          ...activePalette.aliases
+          palette.name,
+          palette.brandLabel,
+          ...palette.aliases
         ].join(" ")
       );
-      return haystack.includes(query);
+      return searchTokens.some((token) => haystack.includes(token));
     });
-  }, [activeColors, activePalette, colorSearchQuery, selectedCodeGroup]);
+
+    const dedupedByHex = new Map<string, ColorSearchItem[]>();
+    for (const item of matchedItems) {
+      const hexKey = item.color.hex.toUpperCase();
+      dedupedByHex.set(hexKey, [...(dedupedByHex.get(hexKey) ?? []), item]);
+    }
+
+    return [...dedupedByHex.values()].map((items) => {
+      const representative =
+        items.find(({ color }) => searchTokens.some((token) => normalizeSearchText(color.code) === token)) ??
+        items[0];
+      const sourceLabels = [...new Set(items.map(getColorSourceLabel))];
+      return {
+        ...representative,
+        sourceCount: items.length,
+        sourceLabels
+      };
+    });
+  }, [activeColorItems, colorSearchItems, colorSearchQuery]);
 
   const totalColorPages = Math.max(1, Math.ceil(filteredColors.length / COLOR_PAGE_SIZE));
   const pagedColors = useMemo(
@@ -942,7 +993,7 @@ function App() {
 
   useEffect(() => {
     setColorPage(0);
-  }, [activePalette.id, selectedBrandId, selectedCodeGroup, paletteSearchQuery, colorSearchQuery]);
+  }, [activePalette.id, colorSearchQuery]);
 
   useEffect(() => {
     if (colorPage > totalColorPages - 1) {
@@ -1761,18 +1812,18 @@ function App() {
           {isColorLabFloating ? (
             <button className="panel-mode-button secondary" type="button" onClick={resetFloatingColorLabSize}>
               <Maximize2 size={14} aria-hidden="true" />
-              重置大小
+              重置
             </button>
           ) : null}
           {isColorLabFloating ? (
             <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
               <PanelRightClose size={14} aria-hidden="true" />
-              停靠右侧
+              停靠
             </button>
           ) : (
             <button className="panel-mode-button" type="button" onClick={toggleColorLabFloating}>
               <PanelRightOpen size={14} aria-hidden="true" />
-              浮动面板
+              浮动
             </button>
           )}
         </div>
@@ -1804,59 +1855,16 @@ function App() {
                 className="text-input"
                 value={colorSearchQuery}
                 onChange={(event) => setColorSearchQuery(event.target.value)}
-                placeholder="搜索颜色（名称或代码）"
+                placeholder="直接搜色号 / 名称 / HEX，如 A1 B2 C5"
               />
             </label>
           </div>
 
-          <div className="brand-filter-row">
-            <button
-              className={`brand-chip ${selectedBrandId === "all" ? "active" : ""}`}
-              type="button"
-              onClick={() => handleBrandSelection("all")}
-            >
-              全部品牌
-            </button>
-            {visibleBrandOptions.map((brand) => (
-              <button
-                key={brand.id}
-                className={`brand-chip ${selectedBrandId === brand.id ? "active" : ""}`}
-                type="button"
-                onClick={() => handleBrandSelection(brand.id)}
-              >
-                {brand.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="palette-search-row">
-            <input
-              className="text-input"
-              value={paletteSearchQuery}
-              onChange={(event) => setPaletteSearchQuery(event.target.value)}
-              placeholder="搜索品牌 / 色卡"
-            />
-          </div>
-
-          <div className="code-group-row">
-            <button
-              className={`code-group-chip ${selectedCodeGroup === "all" ? "active" : ""}`}
-              type="button"
-              onClick={() => setSelectedCodeGroup("all")}
-            >
-              全部
-            </button>
-            {codeGroupOptions.map((item) => (
-              <button
-                key={item.group}
-                className={`code-group-chip ${selectedCodeGroup === item.group ? "active" : ""}`}
-                type="button"
-                onClick={() => setSelectedCodeGroup(item.group)}
-              >
-                {item.group} <span>{item.count}</span>
-              </button>
-            ))}
-          </div>
+          <p className="color-search-hint">
+            {colorSearchQuery
+              ? "正在跨全部色卡搜索，已合并完全相同的颜色，点击会自动切换到对应色卡。"
+              : `当前显示 ${activePalette.brandLabel} · ${activePalette.name}`}
+          </p>
         </div>
 
       {compareMode ? (
@@ -1892,14 +1900,19 @@ function App() {
       ) : null}
 
       <div className="color-card-grid">
-        {pagedColors.map((color) => (
+        {pagedColors.map(({ color, palette, sourceCount, sourceLabels }) => (
           <button
             key={color.id}
             className={`color-card ${selectedColorId === color.id ? "selected" : ""}`}
             type="button"
-            title={getColorLabel(color)}
+            title={getColorSearchItemTitle({ color, palette, sourceCount, sourceLabels })}
             aria-label={`选择颜色 ${getColorLabel(color)}`}
-            onClick={() => setSelectedColor(color.id)}
+            onClick={() => {
+              if (palette.id !== paletteId) {
+                setPalette(palette.id);
+              }
+              setSelectedColor(color.id);
+            }}
           >
             <div className="color-card-top" style={{ backgroundColor: color.hex }}>
               <span>{color.code}</span>
@@ -1907,6 +1920,10 @@ function App() {
             <div className="color-card-body">
               <strong>{color.code}</strong>
               <p>{color.name && color.name !== color.code ? color.name : color.hex}</p>
+              {colorSearchQuery ? <p>{palette.brandLabel}</p> : null}
+              {colorSearchQuery && sourceCount && sourceCount > 1 ? (
+                <span className="color-source-count">同色 {sourceCount}</span>
+              ) : null}
               <p>{color.hex}</p>
               <p>{getRgbLabel(color)}</p>
             </div>
