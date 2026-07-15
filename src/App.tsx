@@ -36,11 +36,11 @@ import type { BeadColor, ProjectData } from "./types";
 import type { SavedProjectRecord } from "./project-library";
 
 const MIN_SCALE = 8;
-const MAX_SCALE = 42;
+const MAX_SCALE = 70;
 const BOARD_SCROLL_PADDING = 28;
 const BOARD_FRAME_EXTRA = 28;
 const clampScale = (value: number) => Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
-const COLOR_PAGE_SIZE = 12;
+const COLOR_PAGE_SIZE = 8;
 const MAJOR_GRID_STEP = 5;
 const MAJOR_GUIDE_LABEL_START = 2;
 const MAJOR_GUIDE_LINE_OFFSET = 1;
@@ -2422,7 +2422,6 @@ function App() {
               应用自定义尺寸
             </button>
             </div>
-            {saveExportPanel}
           </div>
         ) : null}
       </aside>
@@ -2645,6 +2644,7 @@ function App() {
           ) : (
             <aside className="right-inspector">
               {colorLabPanel}
+              {saveExportPanel}
             </aside>
           )}
         </section>
