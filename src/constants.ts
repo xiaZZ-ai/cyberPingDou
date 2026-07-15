@@ -137,16 +137,10 @@ export const getColorLookup = (customPalettes: BeadPalette[] = []) =>
 export const SYSTEM_COLOR_LOOKUP = getColorLookup();
 
 export const CANVAS_SELECTION_PRESETS: PresetBoard[] = [
-  { label: "16 x 16", rows: 16, cols: 16 },
-  { label: "29 x 29", rows: 29, cols: 29 },
-  { label: "29 x 58", rows: 29, cols: 58 },
+  { label: "15 x 15", rows: 15, cols: 15 },
   { label: "32 x 32", rows: 32, cols: 32 },
   { label: "48 x 48", rows: 48, cols: 48 },
   { label: "58 x 58", rows: 58, cols: 58 },
   { label: "64 x 64", rows: 64, cols: 64 },
-  { label: "87 x 58", rows: 87, cols: 58 },
-  { label: "96 x 96", rows: 96, cols: 96 },
-  { label: "128 x 128", rows: 128, cols: 128 },
-  { label: "192 x 192", rows: 192, cols: 192 },
-  { label: "256 x 256", rows: 256, cols: 256 }
+  { label: "87 x 87", rows: 87, cols: 87 }
 ];

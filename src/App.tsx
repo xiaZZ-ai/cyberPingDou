@@ -784,16 +784,7 @@ function App() {
     });
   }, [projectLibrarySearchQuery, savedProjects]);
 
-  const commonCanvasPresets = useMemo(
-    () =>
-      CANVAS_SELECTION_PRESETS.filter(
-        (preset) =>
-          Math.max(preset.rows, preset.cols) <= 87 &&
-          !(preset.rows === 29 && preset.cols === 29) &&
-          !(preset.rows === 32 && preset.cols === 32)
-      ),
-    []
-  );
+  const commonCanvasPresets = useMemo(() => CANVAS_SELECTION_PRESETS, []);
 
   const colorSearchItems = useMemo(
     () =>
