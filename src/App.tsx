@@ -124,10 +124,10 @@ type ColorSearchItem = {
   sourceLabels?: string[];
 };
 
-const FLOATING_COLOR_PANEL_WIDTH = 380;
-const FLOATING_COLOR_PANEL_HEIGHT = 720;
-const FLOATING_COLOR_PANEL_MIN_WIDTH = 320;
-const FLOATING_COLOR_PANEL_MIN_HEIGHT = 420;
+const FLOATING_COLOR_PANEL_WIDTH = 460;
+const FLOATING_COLOR_PANEL_HEIGHT = 760;
+const FLOATING_COLOR_PANEL_MIN_WIDTH = 360;
+const FLOATING_COLOR_PANEL_MIN_HEIGHT = 480;
 const FLOATING_COLOR_PANEL_MARGIN = 20;
 const FLOATING_COLOR_PANEL_STORAGE_KEY = "cyber-pingdou:floating-color-panel";
 const REFERENCE_PANEL_WIDTH = 340;
@@ -575,6 +575,9 @@ function App() {
   const [showMajorGrid, setShowMajorGrid] = useState(true);
   const [exportMinorGrid, setExportMinorGrid] = useState(false);
   const [exportMajorGrid, setExportMajorGrid] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isColorLabCollapsed, setIsColorLabCollapsed] = useState(false);
+  const [isUsageExpanded, setIsUsageExpanded] = useState(false);
   const [isColorLabFloating, setIsColorLabFloating] = useState(false);
   const [floatingColorLabPosition, setFloatingColorLabPosition] = useState<FloatingPanelPosition>(
     createDefaultFloatingPosition
@@ -1809,6 +1812,12 @@ function App() {
           </div>
         </div>
         <div className="color-lab-actions" onPointerDown={(event) => event.stopPropagation()}>
+          {!isColorLabFloating ? (
+            <button className="panel-mode-button secondary" type="button" onClick={() => setIsColorLabCollapsed(true)}>
+              <PanelRightClose size={14} aria-hidden="true" />
+              收起
+            </button>
+          ) : null}
           {isColorLabFloating ? (
             <button className="panel-mode-button secondary" type="button" onClick={resetFloatingColorLabSize}>
               <Maximize2 size={14} aria-hidden="true" />
@@ -1983,13 +1992,30 @@ function App() {
     </section>
   );
 
+  const colorLabRail = (
+    <aside className="right-inspector collapsed">
+      <button className="color-lab-rail-button" type="button" onClick={() => setIsColorLabCollapsed(false)}>
+        <span className="color-lab-rail-chip" style={{ backgroundColor: selectedColor?.hex ?? "#ffffff" }} />
+        <strong>颜色</strong>
+        <span>{selectedColor ? selectedColor.code : "打开"}</span>
+      </button>
+    </aside>
+  );
+
   const colorUsagePanel = (
-    <section className="usage-section color-usage-panel board-usage-panel">
-      <div className="section-head compact">
-        <h2>颜色统计</h2>
-        <span>{colorUsage.length ? `${fillCount} 颗` : "实时统计"}</span>
-      </div>
-      {colorUsage.length > 0 ? (
+    <section className={`usage-section color-usage-panel board-usage-panel ${isUsageExpanded ? "expanded" : "collapsed"}`}>
+      <button className="usage-summary-button" type="button" onClick={() => setIsUsageExpanded((current) => !current)}>
+        <span>
+          <strong>颜色统计</strong>
+          <small>
+            {colorUsage.length
+              ? `已用 ${fillCount.toLocaleString()} 颗 · ${colorUsage.length} 色`
+              : "还没有上色"}
+          </small>
+        </span>
+        <span>{isUsageExpanded ? "收起" : "展开"}</span>
+      </button>
+      {isUsageExpanded && colorUsage.length > 0 ? (
         <div className="usage-grid">
           {colorUsage.map(({ color, count }) => {
             const palette = paletteByColorId.get(color.id);
@@ -2005,9 +2031,10 @@ function App() {
             );
           })}
         </div>
-      ) : (
+      ) : null}
+      {isUsageExpanded && colorUsage.length === 0 ? (
         <div className="empty-state compact">先在画布上放几颗豆子，这里就会开始统计。</div>
-      )}
+      ) : null}
     </section>
   );
 
@@ -2232,9 +2259,28 @@ function App() {
           </div>
         ) : (
           <div className="empty-state compact project-library-empty project-library-empty-modal">
-            {savedProjects.length > 0
-              ? "没有找到匹配的作品。换个关键词试试。"
-              : "还没有保存作品。先点“保存当前”，以后就可以在这里切换多个草稿。"}
+            {savedProjects.length > 0 ? (
+              <>
+                <strong>没有找到匹配的作品</strong>
+                <p>换个关键词试试，或者清空搜索后查看全部作品。</p>
+                <button className="action-button" type="button" onClick={() => setProjectLibrarySearchQuery("")}>
+                  清空搜索
+                </button>
+              </>
+            ) : (
+              <>
+                <strong>还没有保存作品</strong>
+                <p>先保存当前画布，以后就可以在这里切换多个草稿。</p>
+                <div className="project-library-empty-actions">
+                  <button className="action-button solid" type="button" onClick={saveCurrentProjectToLibrary}>
+                    保存当前
+                  </button>
+                  <button className="action-button" type="button" onClick={createNewBlankProject}>
+                    新建空白
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </section>
@@ -2242,7 +2288,11 @@ function App() {
   ) : null;
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+        isColorLabCollapsed || isColorLabFloating ? "color-lab-collapsed" : ""
+      } ${isUsageExpanded ? "usage-expanded" : "usage-collapsed"}`}
+    >
       {projectLibraryModal}
       <input
         ref={referenceFileInputRef}
@@ -2286,9 +2336,17 @@ function App() {
       </section>
 
       <aside className="sidebar">
-        <div className="control-panel">
-          <div className="panel brand-panel">
-            <h1>画布与文件</h1>
+        <button
+          className="sidebar-toggle-button"
+          type="button"
+          onClick={() => setIsSidebarCollapsed((current) => !current)}
+        >
+          {isSidebarCollapsed ? "设置" : "收起设置"}
+        </button>
+        {!isSidebarCollapsed ? (
+          <div className="control-panel">
+            <div className="panel brand-panel">
+              <h1>画布与文件</h1>
             <label className="label" htmlFor="project-name">
               作品名称
             </label>
@@ -2299,9 +2357,9 @@ function App() {
               onChange={(event) => setProjectName(event.target.value)}
               maxLength={40}
             />
-          </div>
+            </div>
 
-          <div className="panel project-library-panel project-library-entry-panel">
+            <div className="panel project-library-panel project-library-entry-panel">
             <div className="section-head">
               <h2>本地作品库</h2>
               <span>{savedProjects.length} 个作品</span>
@@ -2322,9 +2380,9 @@ function App() {
             ) : (
               <p className="project-library-hint">当前画布还没有绑定作品库草稿。</p>
             )}
-          </div>
+            </div>
 
-          <div className="panel canvas-settings-panel">
+            <div className="panel canvas-settings-panel">
             <div className="section-head">
               <h2>画布规格</h2>
               <span>{rows} x {cols}</span>
@@ -2372,12 +2430,18 @@ function App() {
             >
               应用自定义尺寸
             </button>
+            </div>
+            {saveExportPanel}
           </div>
-        </div>
+        ) : null}
       </aside>
 
       <main className="workspace">
-        <section className={`workspace-grid ${isColorLabFloating ? "floating-color-lab" : ""}`}>
+        <section
+          className={`workspace-grid ${isColorLabFloating ? "floating-color-lab" : ""} ${
+            isColorLabCollapsed ? "color-lab-collapsed" : ""
+          }`}
+        >
           <div className="workspace-main-column">
             <section className="board-section">
               <div className="board-workspace-header">
@@ -2585,10 +2649,11 @@ function App() {
               </div>
             </section>
           </div>
-          {isColorLabFloating ? null : (
+          {isColorLabFloating ? null : isColorLabCollapsed ? (
+            colorLabRail
+          ) : (
             <aside className="right-inspector">
               {colorLabPanel}
-              {saveExportPanel}
             </aside>
           )}
         </section>
