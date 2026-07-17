@@ -146,6 +146,20 @@ const isTabletFirstViewport = () => {
   return window.matchMedia("(max-width: 1120px)").matches;
 };
 
+const expandColorSearchToken = (token: string) => {
+  const normalized = normalizeSearchText(token);
+  if (!normalized) {
+    return [];
+  }
+
+  const reversedCodeMatch = normalized.match(/^(\d+)([a-z]+)$/);
+  if (!reversedCodeMatch) {
+    return [normalized];
+  }
+
+  return [normalized, `${reversedCodeMatch[2]}${reversedCodeMatch[1]}`];
+};
+
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
   if (typeof window === "undefined") {
     return { x: 0, y: 96 };
@@ -814,9 +828,9 @@ function App() {
 
     const tokens = colorSearchQuery
       .split(/[\s,，、/]+/)
-      .map((token) => normalizeSearchText(token))
+      .flatMap(expandColorSearchToken)
       .filter(Boolean);
-    const searchTokens = tokens.length ? tokens : [query];
+    const searchTokens = [...new Set(tokens.length ? tokens : expandColorSearchToken(query))];
     const matchedItems = colorSearchItems.filter(({ color, palette }) => {
       const haystack = normalizeSearchText(
         [
