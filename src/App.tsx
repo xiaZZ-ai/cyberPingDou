@@ -139,6 +139,13 @@ const ACTIVE_LIBRARY_PROJECT_STORAGE_KEY = "cyber-pingdou:active-library-project
 const PROJECT_THUMBNAIL_MAX_SIZE = 168;
 const LIBRARY_AUTO_SAVE_DELAY_MS = 700;
 
+const isTabletFirstViewport = () => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.matchMedia("(max-width: 1120px)").matches;
+};
+
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
   if (typeof window === "undefined") {
     return { x: 0, y: 96 };
@@ -575,8 +582,8 @@ function App() {
   const [showMajorGrid, setShowMajorGrid] = useState(true);
   const [exportMinorGrid, setExportMinorGrid] = useState(false);
   const [exportMajorGrid, setExportMajorGrid] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isColorLabCollapsed, setIsColorLabCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(isTabletFirstViewport);
+  const [isColorLabCollapsed, setIsColorLabCollapsed] = useState(isTabletFirstViewport);
   const [isUsageExpanded, setIsUsageExpanded] = useState(false);
   const [isColorLabFloating, setIsColorLabFloating] = useState(false);
   const [floatingColorLabPosition, setFloatingColorLabPosition] = useState<FloatingPanelPosition>(
@@ -1797,18 +1804,18 @@ function App() {
         onPointerUp={stopFloatingColorLabDrag}
         onPointerCancel={stopFloatingColorLabDrag}
       >
+        {!isColorLabFloating ? (
+          <button className="panel-mode-button secondary color-lab-collapse-button" type="button" onClick={() => setIsColorLabCollapsed(true)}>
+            <PanelRightClose size={14} aria-hidden="true" />
+            收起
+          </button>
+        ) : null}
         <div>
           <div className="section-title-row">
             <h2>颜色面板</h2>
           </div>
         </div>
         <div className="color-lab-actions" onPointerDown={(event) => event.stopPropagation()}>
-          {!isColorLabFloating ? (
-            <button className="panel-mode-button secondary" type="button" onClick={() => setIsColorLabCollapsed(true)}>
-              <PanelRightClose size={14} aria-hidden="true" />
-              收起
-            </button>
-          ) : null}
           {isColorLabFloating ? (
             <button className="panel-mode-button secondary" type="button" onClick={resetFloatingColorLabSize}>
               <Maximize2 size={14} aria-hidden="true" />
@@ -1853,6 +1860,11 @@ function App() {
               <Search size={15} aria-hidden="true" />
               <input
                 className="text-input"
+                dir="ltr"
+                inputMode="text"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={colorSearchQuery}
                 onChange={(event) => setColorSearchQuery(event.target.value)}
                 placeholder="直接搜色号 / 名称 / HEX，如 A1 B2 C5"

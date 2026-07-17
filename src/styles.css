@@ -1571,6 +1571,10 @@ h2 {
   padding-bottom: 8px;
 }
 
+.color-lab.docked .color-lab-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .color-lab-header.floating {
   cursor: move;
   touch-action: none;
@@ -1615,6 +1619,13 @@ h2 {
 
 .panel-mode-button.secondary {
   background: #f4f7fb;
+}
+
+.color-lab-collapse-button {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 38px;
+  font-weight: 700;
 }
 
 .color-lab.floating .panel-mode-button {
@@ -1825,6 +1836,9 @@ h2 {
   border: 0;
   border-radius: 0;
   background: transparent;
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: plaintext;
 }
 
 .search-field .text-input:focus {
@@ -2622,7 +2636,49 @@ h2 {
   }
 }
 
-@media (max-width: 1120px) {
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .app-shell:not(.sidebar-collapsed) {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .workspace {
+    padding: 10px 12px 10px 0;
+  }
+
+  .workspace-grid {
+    grid-template-columns: minmax(0, 1fr) 292px;
+    gap: 10px;
+  }
+
+  .workspace-grid.color-lab-collapsed {
+    grid-template-columns: minmax(0, 1fr) 56px;
+  }
+
+  .workspace-main-column,
+  .right-inspector,
+  .board-section {
+    min-height: 0;
+  }
+
+  .board-stage {
+    padding: 10px;
+  }
+
+  .color-lab.docked {
+    min-width: 292px;
+    padding: 12px;
+  }
+
+  .control-panel {
+    margin: 10px;
+  }
+}
+
+@media (max-width: 1023px) {
   html,
   body,
   #root {
@@ -2634,19 +2690,40 @@ h2 {
     overflow-y: auto;
   }
 
-  .app-shell {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
     height: auto;
     min-height: 100dvh;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto auto;
   }
 
+  .workspace-top,
+  .sidebar,
+  .workspace,
+  .app-shell > .board-usage-panel {
+    grid-column: 1;
+  }
+
   .sidebar {
-    grid-row: 2;
+    grid-row: 3;
     min-height: auto;
     grid-template-columns: minmax(0, 1fr);
     border-right: none;
     border-bottom: 1px solid #d5dbe3;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar {
+    background: #f7f9fc;
+    border-right: 0;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-toggle-button {
+    width: auto;
+    min-height: 44px;
+    margin: 0 12px 12px;
+    padding: 0 12px;
+    writing-mode: horizontal-tb;
   }
 
   .sidebar,
@@ -2662,7 +2739,7 @@ h2 {
   .workspace {
     min-height: auto;
     overflow: visible;
-    grid-row: 3;
+    grid-row: 2;
     padding: 12px;
   }
 
@@ -2685,17 +2762,47 @@ h2 {
     align-items: start;
   }
 
+  .workspace-grid.color-lab-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .board-section {
     height: min(680px, 72dvh);
     min-height: 520px;
   }
 
+  .right-inspector {
+    align-self: stretch;
+  }
+
+  .right-inspector.collapsed {
+    min-width: 0;
+  }
+
+  .color-lab-rail-button {
+    width: 100%;
+    height: auto;
+    min-height: 54px;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-rows: none;
+    justify-content: start;
+    padding: 10px 14px;
+  }
+
+  .color-lab-rail-button strong,
+  .color-lab-rail-button span:last-child {
+    writing-mode: horizontal-tb;
+  }
+
   .color-lab.docked {
-    position: relative;
+    position: sticky;
+    bottom: 12px;
+    z-index: 25;
     top: auto;
-    max-height: none;
+    max-height: min(620px, 74dvh);
     min-width: 0;
     padding: 18px 20px;
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.16);
   }
 }
 
@@ -2756,6 +2863,40 @@ h2 {
     min-width: 0;
   }
 
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .text-input,
+  .search-field,
+  .action-button,
+  .canvas-tool-button,
+  .canvas-tool-toggle,
+  .panel-mode-button,
+  .page-button,
+  .preset-button,
+  .zoom-button,
+  .zoom-action,
+  .board-mode-pill,
+  .sidebar-toggle-button,
+  .color-lab-rail-button,
+  .usage-summary-button {
+    min-height: 44px;
+  }
+
+  .canvas-toolbar,
+  .color-lab-actions,
+  .top-actions,
+  .project-library-item-actions {
+    gap: 10px;
+  }
+
+  .board-scroll {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .color-card-top {
+    min-height: 58px;
+  }
 }
 
 @media (max-width: 720px) {
