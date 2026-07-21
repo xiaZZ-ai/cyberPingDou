@@ -153,18 +153,22 @@ const isTabletFirstViewport = () => {
   return window.matchMedia("(max-width: 1120px)").matches;
 };
 
-const expandColorSearchToken = (token: string) => {
+const normalizeColorCode = (token: string) => {
   const normalized = normalizeSearchText(token);
   if (!normalized) {
-    return [];
+    return "";
   }
 
   const reversedCodeMatch = normalized.match(/^(\d+)([a-z]+)$/);
-  if (!reversedCodeMatch) {
-    return [normalized];
+  const code = reversedCodeMatch
+    ? `${reversedCodeMatch[2]}${reversedCodeMatch[1]}`
+    : normalized;
+  const standardCodeMatch = code.match(/^([a-z]+)0*(\d+)$/);
+  if (standardCodeMatch) {
+    return `${standardCodeMatch[1]}${Number.parseInt(standardCodeMatch[2], 10)}`;
   }
 
-  return [normalized, `${reversedCodeMatch[2]}${reversedCodeMatch[1]}`];
+  return code;
 };
 
 const createDefaultFloatingPosition = (): FloatingPanelPosition => {
@@ -292,115 +296,6 @@ const getColorSearchItemTitle = (item: ColorSearchItem) => {
     return baseTitle;
   }
   return `${baseTitle}\n同色来源 ${item.sourceCount} 个：${item.sourceLabels.join("、")}`;
-};
-
-const getColorSearchKeywords = (color: BeadColor) => {
-  const { r, g, b } = hexToRgb(color.hex);
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const delta = max - min;
-  const lightness = (max + min) / 2;
-  const saturation = max === 0 ? 0 : delta / max;
-  let hue = 0;
-
-  if (delta !== 0) {
-    if (max === r) {
-      hue = ((g - b) / delta) % 6;
-    } else if (max === g) {
-      hue = (b - r) / delta + 2;
-    } else {
-      hue = (r - g) / delta + 4;
-    }
-    hue *= 60;
-    if (hue < 0) {
-      hue += 360;
-    }
-  }
-
-  const keywords = new Set<string>();
-  const addKeywords = (...values: string[]) => {
-    values.forEach((value) => keywords.add(value));
-  };
-
-  if (lightness <= 56) {
-    addKeywords("黑色", "黑", "深色", "深黑", "炭黑", "墨色");
-  } else if (saturation <= 0.1 && lightness >= 236) {
-    addKeywords("白色", "白", "亮色", "纯白", "奶白", "米白");
-  } else if (saturation <= 0.12) {
-    addKeywords("灰色", "灰", "中性色", "银灰", "浅灰", "深灰");
-  }
-
-  if (r >= 198 && g >= 160 && b >= 120 && r >= g && g >= b) {
-    addKeywords("肤色", "肉色", "米色", "杏色", "裸色", "奶茶色", "米白", "奶油色");
-  }
-
-  if (r >= 90 && g >= 55 && b <= 90 && lightness <= 150) {
-    addKeywords("棕色", "咖啡色", "褐色", "深棕", "咖色", "巧克力色");
-  }
-
-  if (saturation > 0.12) {
-    if (hue < 15 || hue >= 345) {
-      addKeywords("红色", "红", "正红");
-      if (lightness < 110) {
-        addKeywords("酒红", "暗红", "枣红", "砖红");
-      } else if (lightness > 190) {
-        addKeywords("粉红", "浅红");
-      }
-    } else if (hue < 45) {
-      addKeywords("橙色", "橙", "橘色", "橘", "橘黄");
-      if (lightness > 185) {
-        addKeywords("杏色", "蜜桃色");
-      }
-    } else if (hue < 70) {
-      addKeywords("黄色", "黄", "金色", "土黄");
-      if (lightness > 200) {
-        addKeywords("柠檬黄", "浅黄", "奶黄");
-      } else if (lightness < 150) {
-        addKeywords("姜黄", "芥末黄", "深黄");
-      }
-    } else if (hue < 170) {
-      addKeywords("绿色", "绿");
-      if (hue < 95) {
-        addKeywords("黄绿", "草绿", "嫩绿");
-      } else if (hue < 130) {
-        addKeywords("正绿", "叶绿色");
-      } else {
-        addKeywords("青绿", "薄荷绿", "豆绿");
-      }
-      if (lightness < 110) {
-        addKeywords("墨绿", "深绿", "军绿");
-      } else if (lightness > 190) {
-        addKeywords("浅绿", "淡绿");
-      }
-    } else if (hue < 200) {
-      addKeywords("青色", "青", "蓝绿色", "湖蓝", "青蓝", "孔雀蓝");
-    } else if (hue < 255) {
-      addKeywords("蓝色", "蓝");
-      if (lightness < 95) {
-        addKeywords("深蓝", "藏青", "海军蓝", "墨蓝");
-      } else if (lightness > 185) {
-        addKeywords("浅蓝", "天蓝", "雾蓝", "冰蓝");
-      } else {
-        addKeywords("宝蓝", "湖蓝");
-      }
-    } else if (hue < 290) {
-      addKeywords("紫色", "紫", "蓝紫", "葡萄紫");
-      if (lightness > 180) {
-        addKeywords("浅紫", "薰衣草", "丁香紫");
-      } else if (lightness < 110) {
-        addKeywords("深紫", "暗紫");
-      }
-    } else if (hue < 345) {
-      addKeywords("粉色", "粉", "玫红", "桃粉", "豆沙粉");
-      if (lightness < 150) {
-        addKeywords("梅子色", "紫红");
-      } else {
-        addKeywords("浅粉", "樱花粉");
-      }
-    }
-  }
-
-  return [...keywords];
 };
 
 const colorDistance = (left: BeadColor, right: BeadColor) => {
@@ -836,32 +731,16 @@ function App() {
   );
 
   const filteredColors = useMemo<ColorSearchItem[]>(() => {
-    const query = normalizeSearchText(colorSearchQuery);
-    if (!query) {
+    if (!normalizeSearchText(colorSearchQuery)) {
       return activeColorItems;
     }
 
-    const tokens = colorSearchQuery
+    const searchTokens = [...new Set(colorSearchQuery
       .split(/[\s,，、/]+/)
-      .flatMap(expandColorSearchToken)
-      .filter(Boolean);
-    const searchTokens = [...new Set(tokens.length ? tokens : expandColorSearchToken(query))];
-    const matchedItems = colorSearchItems.filter(({ color, palette }) => {
-      const haystack = normalizeSearchText(
-        [
-          color.code,
-          color.name,
-          color.hex,
-          getRgbLabel(color),
-          color.family ?? "",
-          ...(color.aliases ?? []),
-          ...getColorSearchKeywords(color),
-          palette.name,
-          palette.brandLabel,
-          ...palette.aliases
-        ].join(" ")
-      );
-      return searchTokens.some((token) => haystack.includes(token));
+      .map(normalizeColorCode)
+      .filter(Boolean))];
+    const matchedItems = colorSearchItems.filter(({ color }) => {
+      return searchTokens.includes(normalizeColorCode(color.code));
     });
 
     const dedupedByHex = new Map<string, ColorSearchItem[]>();
@@ -872,7 +751,7 @@ function App() {
 
     return [...dedupedByHex.values()].map((items) => {
       const representative =
-        items.find(({ color }) => searchTokens.some((token) => normalizeSearchText(color.code) === token)) ??
+        items.find(({ palette }) => palette.id === activePalette.id) ??
         items[0];
       const sourceLabels = [...new Set(items.map(getColorSourceLabel))];
       return {
@@ -881,7 +760,7 @@ function App() {
         sourceLabels
       };
     });
-  }, [activeColorItems, colorSearchItems, colorSearchQuery]);
+  }, [activeColorItems, activePalette.id, colorSearchItems, colorSearchQuery]);
 
   const totalColorPages = Math.max(1, Math.ceil(filteredColors.length / COLOR_PAGE_SIZE));
   const pagedColors = useMemo(
@@ -1947,14 +1826,14 @@ function App() {
                 spellCheck={false}
                 value={colorSearchQuery}
                 onChange={(event) => setColorSearchQuery(event.target.value)}
-                placeholder="直接搜色号 / 名称 / HEX，如 A1 B2 C5"
+                placeholder="搜索色号，如 A1 B2 C5"
               />
             </label>
           </div>
 
           <p className="color-search-hint">
             {colorSearchQuery
-              ? "正在跨全部色卡搜索，已合并完全相同的颜色，点击会自动切换到对应色卡。"
+              ? "正在跨全部色卡精确搜索色号；支持 B2、B02、2B 和多个色号。"
               : `当前显示 ${activePalette.brandLabel} · ${activePalette.name}`}
           </p>
         </div>

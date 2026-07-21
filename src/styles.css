@@ -2200,12 +2200,19 @@ h2 {
   align-content: start;
 }
 
-.color-lab.docked .color-card-grid,
-.color-lab.floating .color-card-grid {
+.color-lab.docked .color-card-grid {
   gap: 14px 18px;
   align-items: start;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   grid-template-rows: repeat(2, auto);
+}
+
+.color-lab.floating .color-card-grid {
+  gap: 14px 18px;
+  align-items: start;
+  justify-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 72px));
+  grid-template-rows: none;
 }
 
 .color-card {
@@ -3004,8 +3011,7 @@ h2 {
   }
 }
 
-.color-lab.docked .color-card-grid,
-.color-lab.floating .color-card-grid {
+.color-lab.docked .color-card-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   grid-template-rows: repeat(2, auto);
 }

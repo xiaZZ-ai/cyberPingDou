@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "palettes:sync": "node scripts/sync-public-palettes.mjs",
+    "palettes:validate": "node scripts/validate-palettes.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",
