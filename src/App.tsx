@@ -104,6 +104,11 @@ type FloatingPanelSize = {
   height: number;
 };
 
+type ReferenceImagePan = {
+  x: number;
+  y: number;
+};
+
 type ReferenceImage = {
   name: string;
   src: string;
@@ -135,6 +140,8 @@ const REFERENCE_PANEL_HEIGHT = 280;
 const REFERENCE_PANEL_MIN_WIDTH = 220;
 const REFERENCE_PANEL_MIN_HEIGHT = 160;
 const REFERENCE_PANEL_MARGIN = 20;
+const REFERENCE_IMAGE_MIN_SCALE = 50;
+const REFERENCE_IMAGE_MAX_SCALE = 600;
 const ACTIVE_LIBRARY_PROJECT_STORAGE_KEY = "cyber-pingdou:active-library-project";
 const PROJECT_THUMBNAIL_MAX_SIZE = 168;
 const LIBRARY_AUTO_SAVE_DELAY_MS = 700;
@@ -580,6 +587,13 @@ function App() {
     pointerId: number;
   } | null>(null);
   const referenceDragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
+  const referenceImagePanRef = useRef<{
+    startX: number;
+    startY: number;
+    startPanX: number;
+    startPanY: number;
+    pointerId: number;
+  } | null>(null);
   const referenceResizeRef = useRef<{
     startX: number;
     startY: number;
@@ -616,6 +630,7 @@ function App() {
   });
   const [referenceOpacity, setReferenceOpacity] = useState(100);
   const [referenceImageScale, setReferenceImageScale] = useState(100);
+  const [referenceImagePan, setReferenceImagePan] = useState<ReferenceImagePan>({ x: 0, y: 0 });
   const [colorSearchQuery, setColorSearchQuery] = useState("");
   const [paletteSearchQuery, setPaletteSearchQuery] = useState("");
   const [selectedBrandId, setSelectedBrandId] = useState("all");
@@ -1656,16 +1671,67 @@ function App() {
       setReferencePosition(clampReferencePosition(createDefaultReferencePosition(), nextSize.width, nextSize.height));
       setReferenceOpacity(100);
       setReferenceImageScale(100);
+      setReferenceImagePan({ x: 0, y: 0 });
       setIsReferenceVisible(true);
     };
     reader.readAsDataURL(file);
   };
 
+  const resetReferenceImageView = () => {
+    setReferenceImageScale(100);
+    setReferenceImagePan({ x: 0, y: 0 });
+  };
+
+  const updateReferenceImageScale = (nextScale: number) => {
+    const clampedScale = Math.max(REFERENCE_IMAGE_MIN_SCALE, Math.min(REFERENCE_IMAGE_MAX_SCALE, nextScale));
+    setReferenceImageScale(clampedScale);
+    if (clampedScale <= 100) {
+      setReferenceImagePan({ x: 0, y: 0 });
+    }
+  };
+
   const handleReferenceImageWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    const delta = event.deltaY < 0 ? 10 : -10;
-    setReferenceImageScale((current) => Math.max(100, Math.min(400, current + delta)));
+    const delta = event.deltaY < 0 ? 15 : -15;
+    setReferenceImageScale((current) => {
+      const nextScale = Math.max(REFERENCE_IMAGE_MIN_SCALE, Math.min(REFERENCE_IMAGE_MAX_SCALE, current + delta));
+      if (nextScale <= 100) {
+        setReferenceImagePan({ x: 0, y: 0 });
+      }
+      return nextScale;
+    });
+  };
+
+  const startReferenceImagePan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button, input")) {
+      return;
+    }
+    referenceImagePanRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startPanX: referenceImagePan.x,
+      startPanY: referenceImagePan.y,
+      pointerId: event.pointerId
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const moveReferenceImagePan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (referenceImagePanRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    setReferenceImagePan({
+      x: referenceImagePanRef.current.startPanX + event.clientX - referenceImagePanRef.current.startX,
+      y: referenceImagePanRef.current.startPanY + event.clientY - referenceImagePanRef.current.startY
+    });
+  };
+
+  const stopReferenceImagePan = () => {
+    referenceImagePanRef.current = null;
   };
 
   const startReferencePanelDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1752,7 +1818,7 @@ function App() {
     setReferenceSize(nextSize);
     setReferencePosition(clampReferencePosition(createDefaultReferencePosition(), nextSize.width, nextSize.height));
     setReferenceOpacity(100);
-    setReferenceImageScale(100);
+    resetReferenceImageView();
     setIsReferenceVisible(Boolean(referenceImage));
   };
 
@@ -2090,12 +2156,18 @@ function App() {
             </button>
           </div>
         </div>
-        <div className="reference-image-wrap" onWheel={handleReferenceImageWheel}>
+        <div
+          className={`reference-image-wrap ${referenceImageScale > 100 ? "is-zoomed" : ""}`}
+          onWheel={handleReferenceImageWheel}
+          onPointerDown={startReferenceImagePan}
+          onPointerMove={moveReferenceImagePan}
+          onPointerUp={stopReferenceImagePan}
+          onPointerCancel={stopReferenceImagePan}
+        >
           <div
             className="reference-image-stage"
             style={{
-              width: `${referenceImageScale}%`,
-              height: `${referenceImageScale}%`
+              transform: `translate3d(${referenceImagePan.x}px, ${referenceImagePan.y}px, 0) scale(${referenceImageScale / 100})`
             }}
           >
             <img
@@ -2120,10 +2192,24 @@ function App() {
             <strong>{referenceOpacity}%</strong>
           </label>
           <div className="reference-zoom-row">
-            <span>滚轮缩放</span>
+            <span>图片缩放</span>
+            <button
+              className="panel-mode-button secondary reference-zoom-button"
+              type="button"
+              onClick={() => updateReferenceImageScale(referenceImageScale - 25)}
+            >
+              -
+            </button>
             <strong>{referenceImageScale}%</strong>
-            <button className="panel-mode-button secondary" type="button" onClick={() => setReferenceImageScale(100)}>
-              还原
+            <button
+              className="panel-mode-button secondary reference-zoom-button"
+              type="button"
+              onClick={() => updateReferenceImageScale(referenceImageScale + 25)}
+            >
+              +
+            </button>
+            <button className="panel-mode-button secondary" type="button" onClick={resetReferenceImageView}>
+              适应
             </button>
           </div>
         </div>

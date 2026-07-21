@@ -1728,6 +1728,7 @@ h2 {
 
 .reference-image-wrap {
   min-height: 0;
+  position: relative;
   background:
     linear-gradient(45deg, #eef2f6 25%, transparent 25%),
     linear-gradient(-45deg, #eef2f6 25%, transparent 25%),
@@ -1736,15 +1737,23 @@ h2 {
     #ffffff;
   background-position: 0 0, 0 10px, 10px -10px, -10px 0;
   background-size: 20px 20px;
-  overflow: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
+  touch-action: none;
+  cursor: grab;
+}
+
+.reference-image-wrap:active {
+  cursor: grabbing;
 }
 
 .reference-image-stage {
-  min-width: 100%;
-  min-height: 100%;
+  width: 100%;
+  height: 100%;
   display: grid;
   place-items: center;
+  transform-origin: center;
+  will-change: transform;
 }
 
 .reference-image-wrap img {
@@ -1784,7 +1793,7 @@ h2 {
 
 .reference-zoom-row {
   display: grid;
-  grid-template-columns: auto auto auto;
+  grid-template-columns: auto auto auto auto auto;
   align-items: center;
   justify-content: end;
   gap: 8px;
@@ -1794,6 +1803,11 @@ h2 {
 
 .reference-zoom-row strong {
   color: #263244;
+}
+
+.reference-zoom-button {
+  min-width: 32px;
+  padding-inline: 0;
 }
 
 .reference-resize-handle {
