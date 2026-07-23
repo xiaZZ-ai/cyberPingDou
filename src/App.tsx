@@ -1142,8 +1142,9 @@ function App() {
   const [flashCellIndex, setFlashCellIndex] = useState<number | null>(null);
   const [showSavePanel, setShowSavePanel] = useState(true);
   const [showMajorGrid, setShowMajorGrid] = useState(true);
-  const [exportMinorGrid, setExportMinorGrid] = useState(false);
-  const [exportMajorGrid, setExportMajorGrid] = useState(false);
+  const [exportPatternSheet, setExportPatternSheet] = useState(true);
+  const [exportMinorGrid, setExportMinorGrid] = useState(true);
+  const [exportMajorGrid, setExportMajorGrid] = useState(true);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(isTabletFirstViewport);
   const [isColorLabCollapsed, setIsColorLabCollapsed] = useState(isTabletFirstViewport);
   const [isUsageExpanded, setIsUsageExpanded] = useState(false);
@@ -1977,12 +1978,22 @@ function App() {
   };
 
   const exportImage = async (format: "png" | "jpg") => {
-    const offscreen = document.createElement("canvas");
-    drawBoardToCanvas(offscreen, rows, cols, cells, paletteMap, 32, {
-      showMinorGrid: exportMinorGrid,
-      showMajorGrid: exportMajorGrid,
-      showOutline: exportMinorGrid || exportMajorGrid
-    });
+    const offscreen = exportPatternSheet
+      ? createBeadPatternSheetCanvas(exportProject(), paletteMap, colorLookup, {
+          showMinorGrid: exportMinorGrid,
+          showMajorGrid: exportMajorGrid,
+          showColorCodes: true
+        })
+      : document.createElement("canvas");
+
+    if (!exportPatternSheet) {
+      drawBoardToCanvas(offscreen, rows, cols, cells, paletteMap, 32, {
+        showMinorGrid: exportMinorGrid,
+        showMajorGrid: exportMajorGrid,
+        showOutline: exportMinorGrid || exportMajorGrid
+      });
+    }
+
     const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
     const quality = format === "jpg" ? 0.92 : undefined;
     const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, mimeType, quality));
@@ -2631,6 +2642,14 @@ function App() {
           <label className="toggle-row">
             <input type="checkbox" checked readOnly />
             <span>本地自动保存</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={exportPatternSheet}
+              onChange={(event) => setExportPatternSheet(event.target.checked)}
+            />
+            <span>导出成拼豆图纸</span>
           </label>
           <label className="toggle-row">
             <input
