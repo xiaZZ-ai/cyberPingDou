@@ -1930,12 +1930,13 @@ h2 {
 
 .search-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
 }
 
 .color-lab.docked .search-row {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .code-group-row {
@@ -1972,6 +1973,8 @@ h2 {
 }
 
 .compare-toggle {
+  white-space: nowrap;
+  padding: 0 12px;
   min-height: 36px;
   border-radius: 7px;
   border: 1px solid rgba(29, 36, 51, 0.14);
@@ -2105,38 +2108,95 @@ h2 {
 }
 
 .compare-panel {
-  padding: 14px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
   border-radius: 8px;
   background: rgba(243, 247, 255, 0.8);
   border: 1px solid rgba(29, 36, 51, 0.08);
 }
 
+.compare-base-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid rgba(29, 36, 51, 0.1);
+}
+
+.compare-base-card > div {
+  min-width: 0;
+}
+
+.compare-base-card strong,
+.compare-base-card p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-base-card strong {
+  display: block;
+  color: #1d2433;
+  font-size: 13px;
+}
+
+.compare-base-card p {
+  margin-top: 2px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.compare-base-chip {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  border: 1px solid rgba(29, 36, 51, 0.14);
+}
+
 .compare-list {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .compare-item {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
   text-align: left;
-  padding: 10px 12px;
+  padding: 8px;
   border-radius: 8px;
   border: 1px solid rgba(29, 36, 51, 0.08);
   background: rgba(255, 255, 255, 0.9);
 }
 
+.compare-item > div {
+  min-width: 0;
+}
+
+.compare-item strong,
+.compare-item p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .compare-item p {
   color: #5e6675;
-  font-size: 13px;
+  font-size: 11px;
 }
 
 .compare-chip {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: 7px;
   border: 1px solid rgba(29, 36, 51, 0.12);
 }
 

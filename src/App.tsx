@@ -784,15 +784,31 @@ function App() {
       return [];
     }
 
-    return [...colorLookup.values()]
+    const sortedColors = [...colorLookup.values()]
       .filter((color) => color.id !== selectedColor.id)
       .map((color) => ({
         color,
         palette: paletteByColorId.get(color.id),
         distance: colorDistance(selectedColor, color)
       }))
-      .sort((left, right) => left.distance - right.distance)
-      .slice(0, 6);
+      .filter((item) => item.palette)
+      .sort((left, right) => left.distance - right.distance);
+
+    const seen = new Set<string>();
+    const colors = [];
+    for (const item of sortedColors) {
+      const key = `${item.color.hex.toUpperCase()}-${item.palette?.brandId ?? "unknown"}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      colors.push(item);
+      if (colors.length >= 6) {
+        break;
+      }
+    }
+
+    return colors;
   }, [colorLookup, paletteByColorId, selectedColor]);
 
   const boardScale = useMemo(() => clampScale(scale), [scale]);
@@ -1461,6 +1477,17 @@ function App() {
     }
   };
 
+  const chooseColor = useCallback(
+    (color: BeadColor, palette?: ColorSearchItem["palette"]) => {
+      if (palette && palette.id !== paletteId) {
+        setPalette(palette.id);
+        setSelectedBrandId(palette.brandId);
+      }
+      setSelectedColor(color.id);
+    },
+    [paletteId, setPalette, setSelectedColor]
+  );
+
   const resetFloatingColorLabSize = () => {
     const nextSize = clampFloatingSize({
       width: FLOATING_COLOR_PANEL_WIDTH,
@@ -1829,6 +1856,14 @@ function App() {
                 placeholder="搜索色号，如 A1 B2 C5"
               />
             </label>
+            <button
+              className={`compare-toggle ${compareMode ? "active" : ""}`}
+              type="button"
+              aria-pressed={compareMode}
+              onClick={() => setCompareMode((current) => !current)}
+            >
+              {compareMode ? "关闭推荐" : "近似色推荐"}
+            </button>
           </div>
 
           <p className="color-search-hint">
@@ -1840,9 +1875,21 @@ function App() {
 
       {compareMode ? (
         <div className="compare-panel">
+          {selectedColor ? (
+            <div className="compare-base-card">
+              <span className="compare-base-chip" style={{ backgroundColor: selectedColor.hex }} />
+              <div>
+                <strong>基准色：{getColorLabel(selectedColor)} / {selectedColor.hex}</strong>
+                <p>
+                  {activePalette.brandLabel} · {activePalette.name}
+                  {selectedColor.family ? ` · ${selectedColor.family}` : ""}
+                </p>
+              </div>
+            </div>
+          ) : null}
           <div className="section-head">
-            <h2>近似色比对</h2>
-            <span>跨品牌找接近颜色</span>
+            <h2>当前颜色的近似色</h2>
+            <span>点击下方色块会切换基准色</span>
           </div>
           <div className="compare-list">
             {closestColors.map(({ color, palette }) => (
@@ -1850,12 +1897,7 @@ function App() {
                 key={color.id}
                 className="compare-item"
                 type="button"
-                onClick={() => {
-                  if (palette) {
-                    setPalette(palette.id);
-                  }
-                  setSelectedColor(color.id);
-                }}
+                onClick={() => chooseColor(color, palette)}
               >
                 <span className="compare-chip" style={{ backgroundColor: color.hex }} />
                 <div>
@@ -1878,12 +1920,7 @@ function App() {
             type="button"
             title={getColorSearchItemTitle({ color, palette, sourceCount, sourceLabels })}
             aria-label={`选择颜色 ${getColorLabel(color)}`}
-            onClick={() => {
-              if (palette.id !== paletteId) {
-                setPalette(palette.id);
-              }
-              setSelectedColor(color.id);
-            }}
+            onClick={() => chooseColor(color, palette)}
           >
             <div className="color-card-top" style={{ backgroundColor: color.hex }}>
               <span>{color.code}</span>
