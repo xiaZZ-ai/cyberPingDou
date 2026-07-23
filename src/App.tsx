@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLayoutEffect } from "react";
+import type { ChangeEvent } from "react";
 import {
   Brush,
   Download,
@@ -90,6 +91,8 @@ type DrawBoardOptions = {
   showMinorGrid?: boolean;
   showMajorGrid?: boolean;
   showOutline?: boolean;
+  showColorCodes?: boolean;
+  colorLookup?: Map<string, BeadColor>;
   hoverCellIndex?: number | null;
   flashCellIndex?: number | null;
 };
@@ -114,6 +117,23 @@ type ReferenceImage = {
   src: string;
 };
 
+type ConverterImage = {
+  name: string;
+  src: string;
+  width: number;
+  height: number;
+  fileType: string;
+  fileSize: number;
+};
+
+type ConverterFitMode = "cover" | "contain";
+type ConverterBackgroundMode = "edge-multi" | "edge-dominant" | "light";
+
+type ConverterGenerationResult = {
+  project: ProjectData;
+  removedBackgroundCount: number;
+};
+
 type BoardZoomAnchor = {
   anchorX: number;
   anchorY: number;
@@ -127,6 +147,20 @@ type ColorSearchItem = {
   palette: ReturnType<typeof getAllPalettes>[number];
   sourceCount?: number;
   sourceLabels?: string[];
+};
+
+type AppRoute = "editor" | "image-converter";
+
+const ROUTE_PATHS: Record<AppRoute, string> = {
+  editor: "/editor",
+  "image-converter": "/image-converter"
+};
+
+const getRouteFromPath = (path: string): AppRoute => {
+  if (path.startsWith("/image-converter")) {
+    return "image-converter";
+  }
+  return "editor";
 };
 
 const FLOATING_COLOR_PANEL_WIDTH = 460;
@@ -145,6 +179,14 @@ const REFERENCE_IMAGE_MAX_SCALE = 600;
 const ACTIVE_LIBRARY_PROJECT_STORAGE_KEY = "cyber-pingdou:active-library-project";
 const PROJECT_THUMBNAIL_MAX_SIZE = 168;
 const LIBRARY_AUTO_SAVE_DELAY_MS = 700;
+const CONVERTER_ACCEPTED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/avif"
+]);
+const CONVERTER_ACCEPTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
 
 const isTabletFirstViewport = () => {
   if (typeof window === "undefined") {
@@ -304,6 +346,379 @@ const colorDistance = (left: BeadColor, right: BeadColor) => {
   return Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
 };
 
+const rgbDistance = (
+  left: { r: number; g: number; b: number },
+  right: { r: number; g: number; b: number }
+) => Math.sqrt((left.r - right.r) ** 2 + (left.g - right.g) ** 2 + (left.b - right.b) ** 2);
+
+const loadImageElement = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片读取失败"));
+    image.src = src;
+  });
+
+const readImageFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("文件读取失败"));
+    };
+    reader.onerror = () => reject(new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
+
+const formatFileSize = (size: number) => {
+  if (size >= 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+};
+
+const isSupportedConverterImage = (file: File) => {
+  const lowerName = file.name.toLowerCase();
+  const hasSupportedExtension = CONVERTER_ACCEPTED_IMAGE_EXTENSIONS.some((extension) =>
+    lowerName.endsWith(extension)
+  );
+  return CONVERTER_ACCEPTED_IMAGE_TYPES.has(file.type) || hasSupportedExtension;
+};
+
+const getUnsupportedImageMessage = (file: File) => {
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".heic") || lowerName.endsWith(".heif") || file.type === "image/heic" || file.type === "image/heif") {
+    return "这个像是 HEIC/HEIF 格式，浏览器通常不能直接转换。请先另存为 JPG 或 PNG。";
+  }
+  return "暂时只支持 JPG、PNG、WebP、AVIF 图片，请换一种图片格式试试。";
+};
+
+const getLimitedColorCount = (value: string) => {
+  if (value === "few") {
+    return 16;
+  }
+  if (value === "medium") {
+    return 32;
+  }
+  if (value === "many") {
+    return 64;
+  }
+  return null;
+};
+
+const getImageDrawRect = (
+  imageWidth: number,
+  imageHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+  fitMode: ConverterFitMode
+) => {
+  const imageRatio = imageWidth / imageHeight;
+  const targetRatio = targetWidth / targetHeight;
+
+  if (fitMode === "contain") {
+    const width = imageRatio > targetRatio ? targetWidth : targetHeight * imageRatio;
+    const height = imageRatio > targetRatio ? targetWidth / imageRatio : targetHeight;
+    return {
+      x: (targetWidth - width) / 2,
+      y: (targetHeight - height) / 2,
+      width,
+      height
+    };
+  }
+
+  const width = imageRatio > targetRatio ? targetHeight * imageRatio : targetWidth;
+  const height = imageRatio > targetRatio ? targetHeight : targetWidth / imageRatio;
+  return {
+    x: (targetWidth - width) / 2,
+    y: (targetHeight - height) / 2,
+    width,
+    height
+  };
+};
+
+const getReadableTextColor = (hex: string) => {
+  const { r, g, b } = hexToRgb(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.58 ? "#111827" : "#ffffff";
+};
+
+const isLightBackgroundColor = (hex: string) => {
+  const { r, g, b } = hexToRgb(hex);
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+  return luminance >= 225 && chroma <= 42;
+};
+
+const findEdgeDominantColorId = (cells: string[], rows: number, cols: number) => {
+  const counts = new Map<string, number>();
+  const countCell = (row: number, col: number) => {
+    const colorId = cells[row * cols + col];
+    if (colorId === EMPTY_CELL) {
+      return;
+    }
+    counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
+  };
+
+  for (let col = 0; col < cols; col += 1) {
+    countCell(0, col);
+    if (rows > 1) {
+      countCell(rows - 1, col);
+    }
+  }
+
+  for (let row = 1; row < rows - 1; row += 1) {
+    countCell(row, 0);
+    if (cols > 1) {
+      countCell(row, cols - 1);
+    }
+  }
+
+  return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
+};
+
+const getEdgeColorCounts = (cells: string[], rows: number, cols: number) => {
+  const counts = new Map<string, number>();
+  const countCell = (row: number, col: number) => {
+    const colorId = cells[row * cols + col];
+    if (colorId === EMPTY_CELL) {
+      return;
+    }
+    counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
+  };
+
+  for (let col = 0; col < cols; col += 1) {
+    countCell(0, col);
+    if (rows > 1) {
+      countCell(rows - 1, col);
+    }
+  }
+
+  for (let row = 1; row < rows - 1; row += 1) {
+    countCell(row, 0);
+    if (cols > 1) {
+      countCell(row, cols - 1);
+    }
+  }
+
+  return counts;
+};
+
+const findEdgeBackgroundColorIds = (
+  cells: string[],
+  rows: number,
+  cols: number,
+  colorHexLookup: Map<string, string>
+) => {
+  const edgeCounts = getEdgeColorCounts(cells, rows, cols);
+  const rankedEdgeColors = [...edgeCounts.entries()].sort((left, right) => right[1] - left[1]);
+  const directTargets = new Set<string>();
+  const edgeSamples: Array<{ r: number; g: number; b: number }> = [];
+  const minimumCount = Math.max(2, Math.ceil((rows * 2 + cols * 2 - 4) * 0.015));
+
+  for (const [colorId, count] of rankedEdgeColors.slice(0, 12)) {
+    if (count < minimumCount && directTargets.size >= 4) {
+      continue;
+    }
+    directTargets.add(colorId);
+    const hex = colorHexLookup.get(colorId);
+    if (hex) {
+      edgeSamples.push(hexToRgb(hex));
+    }
+  }
+
+  for (const [colorId, hex] of colorHexLookup) {
+    if (directTargets.has(colorId)) {
+      continue;
+    }
+    const rgb = hexToRgb(hex);
+    if (edgeSamples.some((sample) => rgbDistance(rgb, sample) <= 42)) {
+      directTargets.add(colorId);
+    }
+  }
+
+  return directTargets;
+};
+
+const removeExternalBackgroundCells = (
+  cells: string[],
+  rows: number,
+  cols: number,
+  palette: ReturnType<typeof getPaletteById>,
+  mode: ConverterBackgroundMode
+) => {
+  const nextCells = [...cells];
+  const colorHexLookup = new Map(palette.colors.map((color) => [color.id, color.hex] as const));
+  const targetColorId = mode === "edge-dominant" ? findEdgeDominantColorId(cells, rows, cols) : null;
+  const targetColorIds =
+    mode === "edge-multi" ? findEdgeBackgroundColorIds(cells, rows, cols, colorHexLookup) : new Set<string>();
+  const visited = new Set<number>();
+  const stack: number[] = [];
+
+  const isBackgroundCell = (index: number) => {
+    const colorId = cells[index];
+    if (colorId === EMPTY_CELL) {
+      return true;
+    }
+    if (mode === "edge-dominant") {
+      return colorId === targetColorId;
+    }
+    if (mode === "edge-multi") {
+      return targetColorIds.has(colorId);
+    }
+    const hex = colorHexLookup.get(colorId);
+    return hex ? isLightBackgroundColor(hex) : false;
+  };
+
+  if ((mode === "edge-dominant" && !targetColorId) || (mode === "edge-multi" && targetColorIds.size === 0)) {
+    return { cells: nextCells, removedCount: 0 };
+  }
+
+  const pushIfBackground = (row: number, col: number) => {
+    if (row < 0 || row >= rows || col < 0 || col >= cols) {
+      return;
+    }
+    const index = row * cols + col;
+    if (visited.has(index) || !isBackgroundCell(index)) {
+      return;
+    }
+    visited.add(index);
+    stack.push(index);
+  };
+
+  for (let col = 0; col < cols; col += 1) {
+    pushIfBackground(0, col);
+    pushIfBackground(rows - 1, col);
+  }
+  for (let row = 1; row < rows - 1; row += 1) {
+    pushIfBackground(row, 0);
+    pushIfBackground(row, cols - 1);
+  }
+
+  let removedCount = 0;
+  while (stack.length > 0) {
+    const index = stack.pop();
+    if (index === undefined) {
+      continue;
+    }
+    if (nextCells[index] !== EMPTY_CELL) {
+      nextCells[index] = EMPTY_CELL;
+      removedCount += 1;
+    }
+
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    pushIfBackground(row - 1, col);
+    pushIfBackground(row + 1, col);
+    pushIfBackground(row, col - 1);
+    pushIfBackground(row, col + 1);
+  }
+
+  return { cells: nextCells, removedCount };
+};
+
+const createBeadProjectFromImage = async (
+  imageSource: ConverterImage,
+  rows: number,
+  cols: number,
+  palette: ReturnType<typeof getPaletteById>,
+  selectedColorId: string,
+  colorLimit: string,
+  fitMode: ConverterFitMode,
+  transparentAsEmpty: boolean,
+  removeBackground: boolean,
+  backgroundMode: ConverterBackgroundMode
+): Promise<ConverterGenerationResult> => {
+  const image = await loadImageElement(imageSource.src);
+  const canvas = document.createElement("canvas");
+  canvas.width = cols;
+  canvas.height = rows;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("浏览器不支持图片转换");
+  }
+
+  ctx.clearRect(0, 0, cols, rows);
+  if (!transparentAsEmpty) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, cols, rows);
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  const rect = getImageDrawRect(image.naturalWidth || imageSource.width, image.naturalHeight || imageSource.height, cols, rows, fitMode);
+  ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+
+  const imageData = ctx.getImageData(0, 0, cols, rows);
+  const candidates = palette.colors.map((color) => ({
+    id: color.id,
+    rgb: hexToRgb(color.hex)
+  }));
+  const closestColor = (rgb: { r: number; g: number; b: number }, allowed = candidates) => {
+    let best = allowed[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const color of allowed) {
+      const distance = rgbDistance(rgb, color.rgb);
+      if (distance < bestDistance) {
+        best = color;
+        bestDistance = distance;
+      }
+    }
+    return best.id;
+  };
+
+  const rawPixels: Array<{ rgb: { r: number; g: number; b: number }; empty: boolean; colorId: string }> = [];
+  const counts = new Map<string, number>();
+  for (let index = 0; index < imageData.data.length; index += 4) {
+    const alpha = imageData.data[index + 3];
+    const empty = transparentAsEmpty && alpha < 24;
+    const rgb = {
+      r: imageData.data[index],
+      g: imageData.data[index + 1],
+      b: imageData.data[index + 2]
+    };
+    const colorId = empty ? EMPTY_CELL : closestColor(rgb);
+    rawPixels.push({ rgb, empty, colorId });
+    if (!empty) {
+      counts.set(colorId, (counts.get(colorId) ?? 0) + 1);
+    }
+  }
+
+  const limitedColorCount = getLimitedColorCount(colorLimit);
+  const allowed =
+    limitedColorCount && counts.size > limitedColorCount
+      ? [...counts.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, limitedColorCount)
+          .map(([colorId]) => candidates.find((color) => color.id === colorId))
+          .filter((color): color is (typeof candidates)[number] => Boolean(color))
+      : candidates;
+
+  const mappedCells = rawPixels.map((pixel) => (pixel.empty ? EMPTY_CELL : closestColor(pixel.rgb, allowed)));
+  const backgroundResult = removeBackground
+    ? removeExternalBackgroundCells(mappedCells, rows, cols, palette, backgroundMode)
+    : { cells: mappedCells, removedCount: 0 };
+  const baseName = imageSource.name.replace(/\.[^.]+$/, "").trim() || "图片";
+
+  return {
+    project: {
+      version: 1,
+      name: `${baseName} 拼豆图`,
+      rows,
+      cols,
+      paletteId: palette.id,
+      selectedColorId: palette.colors.some((color) => color.id === selectedColorId)
+        ? selectedColorId
+        : palette.colors[0]?.id ?? selectedColorId,
+      cells: backgroundResult.cells,
+      updatedAt: new Date().toISOString()
+    },
+    removedBackgroundCount: backgroundResult.removedCount
+  };
+};
+
 const drawBoardToCanvas = (
   canvas: HTMLCanvasElement,
   rows: number,
@@ -317,6 +732,8 @@ const drawBoardToCanvas = (
     showMinorGrid = true,
     showMajorGrid = false,
     showOutline = true,
+    showColorCodes = false,
+    colorLookup,
     hoverCellIndex = null,
     flashCellIndex = null
   } = options;
@@ -348,6 +765,35 @@ const drawBoardToCanvas = (
       }
 
     }
+  }
+
+  if (showColorCodes && colorLookup && cellSize >= 18) {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `${Math.max(9, Math.floor(cellSize * 0.34))}px Arial, sans-serif`;
+
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        const index = row * cols + col;
+        const cell = cells[index];
+        if (cell === EMPTY_CELL) {
+          continue;
+        }
+
+        const color = colorLookup.get(cell);
+        if (!color?.code) {
+          continue;
+        }
+
+        const x = col * cellSize + cellSize / 2;
+        const y = row * cellSize + cellSize / 2;
+        ctx.fillStyle = getReadableTextColor(color.hex);
+        ctx.fillText(color.code, x, y, cellSize - 4);
+      }
+    }
+
+    ctx.restore();
   }
 
   if (showMajorGrid) {
@@ -448,6 +894,198 @@ const createProjectThumbnailDataUrl = (project: ProjectData, paletteMap: Map<str
   return canvas.toDataURL("image/png");
 };
 
+const getProjectUsageItems = (project: ProjectData, colorLookup: Map<string, BeadColor>) => {
+  const counts = new Map<string, number>();
+  for (const cell of project.cells) {
+    if (cell !== EMPTY_CELL) {
+      counts.set(cell, (counts.get(cell) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .map(([colorId, count]) => ({
+      color: colorLookup.get(colorId),
+      count
+    }))
+    .filter((item): item is { color: BeadColor; count: number } => Boolean(item.color))
+    .sort((left, right) => right.count - left.count);
+};
+
+const createBeadPatternSheetCanvas = (
+  project: ProjectData,
+  paletteMap: Map<string, string>,
+  colorLookup: Map<string, BeadColor>,
+  options: {
+    showMinorGrid: boolean;
+    showMajorGrid: boolean;
+    showColorCodes: boolean;
+  }
+) => {
+  const cellSize = 32;
+  const rulerSize = 34;
+  const titleHeight = 58;
+  const frameWidth = project.cols * cellSize + rulerSize * 2;
+  const frameHeight = project.rows * cellSize + rulerSize * 2;
+  const boardX = rulerSize;
+  const boardY = titleHeight + rulerSize;
+  const boardCanvas = document.createElement("canvas");
+  drawBoardToCanvas(boardCanvas, project.rows, project.cols, project.cells, paletteMap, cellSize, {
+    showMinorGrid: options.showMinorGrid,
+    showMajorGrid: false,
+    showOutline: false,
+    showColorCodes: options.showColorCodes,
+    colorLookup
+  });
+
+  const usageItems = getProjectUsageItems(project, colorLookup);
+  const totalBeads = usageItems.reduce((total, item) => total + item.count, 0);
+  const legendPadding = 28;
+  const chipGap = 16;
+  const chipHeight = 44;
+  const chipMinWidth = 148;
+  const chipsPerRow = Math.max(1, Math.floor((frameWidth - legendPadding * 2 + chipGap) / (chipMinWidth + chipGap)));
+  const chipWidth = Math.max(
+    chipMinWidth,
+    Math.floor((frameWidth - legendPadding * 2 - chipGap * (chipsPerRow - 1)) / chipsPerRow)
+  );
+  const legendRows = Math.max(1, Math.ceil(usageItems.length / chipsPerRow));
+  const legendHeight = usageItems.length > 0 ? legendPadding * 2 + legendRows * chipHeight + (legendRows - 1) * chipGap : 0;
+  const canvas = document.createElement("canvas");
+  canvas.width = frameWidth;
+  canvas.height = titleHeight + frameHeight + legendHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return boardCanvas;
+  }
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.fillStyle = "#111827";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "700 24px Arial, sans-serif";
+  ctx.fillText(
+    `${project.name || "图片转拼豆"}  [${project.cols}x${project.rows}/${usageItems.length}色/共${totalBeads}颗]`,
+    canvas.width / 2,
+    titleHeight / 2,
+    canvas.width - 28
+  );
+  ctx.restore();
+
+  const frameTop = titleHeight;
+  const frameBottom = titleHeight + frameHeight;
+  const boardWidth = project.cols * cellSize;
+  const boardHeight = project.rows * cellSize;
+  const boardRight = boardX + boardWidth;
+  const boardBottom = boardY + boardHeight;
+
+  ctx.fillStyle = "#d9d9d9";
+  ctx.fillRect(boardX, frameTop, boardWidth, rulerSize);
+  ctx.fillRect(boardX, boardBottom, boardWidth, rulerSize);
+  ctx.fillRect(0, boardY, rulerSize, boardHeight);
+  ctx.fillRect(boardRight, boardY, rulerSize, boardHeight);
+  ctx.fillStyle = "#d2d2d2";
+  ctx.fillRect(0, frameTop, rulerSize, rulerSize);
+  ctx.fillRect(boardRight, frameTop, rulerSize, rulerSize);
+  ctx.fillRect(0, boardBottom, rulerSize, rulerSize);
+  ctx.fillRect(boardRight, boardBottom, rulerSize, rulerSize);
+
+  ctx.drawImage(boardCanvas, boardX, boardY);
+
+  ctx.save();
+  ctx.strokeStyle = "#a9adb3";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#30343b";
+  ctx.font = "14px Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (let col = 0; col < project.cols; col += 1) {
+    const x = boardX + col * cellSize;
+    const label = String(col + 1);
+    ctx.strokeRect(x + 0.5, frameTop + 0.5, cellSize, rulerSize);
+    ctx.fillText(label, x + cellSize / 2, frameTop + rulerSize / 2);
+    ctx.strokeRect(x + 0.5, boardBottom + 0.5, cellSize, rulerSize);
+    ctx.fillText(label, x + cellSize / 2, boardBottom + rulerSize / 2);
+  }
+
+  for (let row = 0; row < project.rows; row += 1) {
+    const y = boardY + row * cellSize;
+    const label = String(row + 1);
+    ctx.strokeRect(0.5, y + 0.5, rulerSize, cellSize);
+    ctx.fillText(label, rulerSize / 2, y + cellSize / 2);
+    ctx.strokeRect(boardRight + 0.5, y + 0.5, rulerSize, cellSize);
+    ctx.fillText(label, boardRight + rulerSize / 2, y + cellSize / 2);
+  }
+
+  ctx.strokeStyle = "#8d96a3";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, frameTop + 1, frameWidth - 2, frameHeight - 2);
+  ctx.restore();
+
+  if (options.showMajorGrid) {
+    ctx.save();
+    const majorLineWidth = 4;
+    const align = (value: number) => Math.round(value) + 0.5;
+    ctx.strokeStyle = "#ef3f39";
+    ctx.lineWidth = majorLineWidth;
+    ctx.lineCap = "butt";
+
+    for (let col = MAJOR_GUIDE_LINE_OFFSET; col < project.cols; col += MAJOR_GRID_STEP) {
+      const x = align(boardX + col * cellSize);
+      ctx.beginPath();
+      ctx.moveTo(x, frameTop);
+      ctx.lineTo(x, frameBottom);
+      ctx.stroke();
+    }
+
+    for (let row = MAJOR_GUIDE_LINE_OFFSET; row < project.rows; row += MAJOR_GRID_STEP) {
+      const y = align(boardY + row * cellSize);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(frameWidth, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (usageItems.length > 0) {
+    const legendTop = titleHeight + frameHeight;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, legendTop, canvas.width, legendHeight);
+    ctx.font = "700 24px Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    usageItems.forEach(({ color, count }, index) => {
+      const row = Math.floor(index / chipsPerRow);
+      const col = index % chipsPerRow;
+      const x = legendPadding + col * (chipWidth + chipGap);
+      const y = legendTop + legendPadding + row * (chipHeight + chipGap);
+      const codeWidth = Math.max(56, Math.min(82, Math.floor(chipWidth * 0.46)));
+
+      ctx.fillStyle = color.hex;
+      ctx.fillRect(x, y, codeWidth, chipHeight);
+      ctx.strokeStyle = "#7f8794";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, codeWidth, chipHeight);
+      ctx.fillStyle = getReadableTextColor(color.hex);
+      ctx.fillText(color.code, x + codeWidth / 2, y + chipHeight / 2);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x + codeWidth, y, chipWidth - codeWidth, chipHeight);
+      ctx.strokeStyle = "#7f8794";
+      ctx.strokeRect(x + codeWidth, y, chipWidth - codeWidth, chipHeight);
+      ctx.fillStyle = "#111827";
+      ctx.fillText(String(count), x + codeWidth + (chipWidth - codeWidth) / 2, y + chipHeight / 2);
+    });
+  }
+
+  return canvas;
+};
+
 const formatProjectTime = (value: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -470,6 +1108,7 @@ function App() {
   const colorLabPanelRef = useRef<HTMLElement | null>(null);
   const referencePanelRef = useRef<HTMLElement | null>(null);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const converterPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragPaintedRef = useRef<number | null>(null);
   const paintFlashTimeoutRef = useRef<number | null>(null);
   const skipNextLibraryAutoSaveRef = useRef<string | null>(null);
@@ -544,6 +1183,12 @@ function App() {
   const [editingLibraryProjectId, setEditingLibraryProjectId] = useState<string | null>(null);
   const [editingLibraryProjectName, setEditingLibraryProjectName] = useState("");
   const [projectLibrarySearchQuery, setProjectLibrarySearchQuery] = useState("");
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => {
+    if (typeof window === "undefined") {
+      return "editor";
+    }
+    return getRouteFromPath(window.location.pathname);
+  });
 
   const {
     name,
@@ -584,6 +1229,22 @@ function App() {
     () => new Map(availablePalettes.flatMap((palette) => palette.colors.map((color) => [color.id, color.hex] as const))),
     [availablePalettes]
   );
+
+  const [converterImage, setConverterImage] = useState<ConverterImage | null>(null);
+  const [converterBoardSize, setConverterBoardSize] = useState(`${rows}x${cols}`);
+  const [converterPaletteId, setConverterPaletteId] = useState(activePalette.id);
+  const [converterColorLimit, setConverterColorLimit] = useState("auto");
+  const [converterFitMode, setConverterFitMode] = useState<ConverterFitMode>("cover");
+  const [converterTransparentAsEmpty, setConverterTransparentAsEmpty] = useState(true);
+  const [converterRemoveBackground, setConverterRemoveBackground] = useState(true);
+  const [converterBackgroundMode, setConverterBackgroundMode] =
+    useState<ConverterBackgroundMode>("light");
+  const [converterExportMinorGrid, setConverterExportMinorGrid] = useState(true);
+  const [converterExportMajorGrid, setConverterExportMajorGrid] = useState(true);
+  const [converterExportColorCodes, setConverterExportColorCodes] = useState(true);
+  const [converterProject, setConverterProject] = useState<ProjectData | null>(null);
+  const [converterMessage, setConverterMessage] = useState("先上传图片，再生成拼豆稿");
+  const [isConvertingImage, setIsConvertingImage] = useState(false);
 
   const paletteByColorId = useMemo(
     () =>
@@ -716,6 +1377,42 @@ function App() {
   }, [projectLibrarySearchQuery, savedProjects]);
 
   const commonCanvasPresets = useMemo(() => CANVAS_SELECTION_PRESETS, []);
+  const converterBoardOptions = useMemo(() => {
+    const current = { label: `当前画布 ${rows} x ${cols}`, rows, cols };
+    const seen = new Set<string>();
+    return [current, ...commonCanvasPresets].filter((preset) => {
+      const key = `${preset.rows}x${preset.cols}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [commonCanvasPresets, cols, rows]);
+
+  const converterPalette = useMemo(
+    () => getPaletteById(converterPaletteId, customPalettes),
+    [converterPaletteId, customPalettes]
+  );
+
+  const converterUsage = useMemo(() => {
+    if (!converterProject) {
+      return [];
+    }
+    const counts = new Map<string, number>();
+    for (const cell of converterProject.cells) {
+      if (cell !== EMPTY_CELL) {
+        counts.set(cell, (counts.get(cell) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([colorId, count]) => ({
+        color: converterPalette.colors.find((item) => item.id === colorId) ?? colorLookup.get(colorId),
+        count
+      }))
+      .filter((item): item is { color: BeadColor; count: number } => Boolean(item.color))
+      .sort((left, right) => right.count - left.count);
+  }, [colorLookup, converterPalette.colors, converterProject]);
 
   const colorSearchItems = useMemo(
     () =>
@@ -854,6 +1551,21 @@ function App() {
     if (typeof window === "undefined") {
       return;
     }
+
+    if (window.location.pathname === "/") {
+      window.history.replaceState({ route: "editor" }, "", ROUTE_PATHS.editor);
+      setCurrentRoute("editor");
+    }
+
+    const syncRoute = () => setCurrentRoute(getRouteFromPath(window.location.pathname));
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     if (activeLibraryProjectId) {
       window.localStorage.setItem(ACTIVE_LIBRARY_PROJECT_STORAGE_KEY, activeLibraryProjectId);
     } else {
@@ -925,6 +1637,42 @@ function App() {
       setColorPage(totalColorPages - 1);
     }
   }, [colorPage, totalColorPages]);
+
+  useEffect(() => {
+    if (availablePalettes.some((palette) => palette.id === converterPaletteId)) {
+      return;
+    }
+    setConverterPaletteId(activePalette.id);
+  }, [activePalette.id, availablePalettes, converterPaletteId]);
+
+  useEffect(() => {
+    const canvas = converterPreviewCanvasRef.current;
+    if (!canvas || !converterProject) {
+      return;
+    }
+    const sheetCanvas = createBeadPatternSheetCanvas(converterProject, paletteMap, colorLookup, {
+      showMinorGrid: converterExportMinorGrid,
+      showMajorGrid: converterExportMajorGrid,
+      showColorCodes: converterExportColorCodes
+    });
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    canvas.width = sheetCanvas.width;
+    canvas.height = sheetCanvas.height;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(sheetCanvas, 0, 0);
+  }, [colorLookup, converterExportColorCodes, converterExportMajorGrid, converterExportMinorGrid, converterProject, paletteMap]);
+
+  useEffect(
+    () => () => {
+      if (converterImage?.src.startsWith("blob:")) {
+        URL.revokeObjectURL(converterImage.src);
+      }
+    },
+    [converterImage]
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1475,6 +2223,147 @@ function App() {
     if (nextPalette) {
       setSelectedBrandId(nextPalette.brandId);
     }
+  };
+
+  const navigateTo = (route: AppRoute) => {
+    if (typeof window !== "undefined" && window.location.pathname !== ROUTE_PATHS[route]) {
+      window.history.pushState({ route }, "", ROUTE_PATHS[route]);
+    }
+    setCurrentRoute(route);
+  };
+
+  const parseConverterBoardSize = () => {
+    const [rawRows, rawCols] = converterBoardSize.split("x");
+    return {
+      rows: Math.max(8, Math.min(120, Number.parseInt(rawRows, 10) || rows)),
+      cols: Math.max(8, Math.min(120, Number.parseInt(rawCols, 10) || cols))
+    };
+  };
+
+  const handleConverterImageChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    if (!isSupportedConverterImage(file)) {
+      setConverterImage(null);
+      setConverterProject(null);
+      setConverterMessage(getUnsupportedImageMessage(file));
+      return;
+    }
+
+    setConverterProject(null);
+    setConverterMessage(`正在读取 ${file.name} · ${file.type || "未知格式"} · ${formatFileSize(file.size)}`);
+
+    try {
+      const src = await readImageFileAsDataUrl(file);
+      const image = await loadImageElement(src);
+      setConverterImage((current) => {
+        if (current?.src.startsWith("blob:")) {
+          URL.revokeObjectURL(current.src);
+        }
+        return {
+          name: file.name,
+          src,
+          width: image.naturalWidth || image.width,
+          height: image.naturalHeight || image.height,
+          fileType: file.type || "未知格式",
+          fileSize: file.size
+        };
+      });
+      setConverterMessage(
+        `已读取 ${image.naturalWidth || image.width} x ${image.naturalHeight || image.height} 图片，可以生成拼豆稿`
+      );
+    } catch {
+      setConverterImage(null);
+      setConverterProject(null);
+      setConverterMessage(
+        `${getUnsupportedImageMessage(file)} 如果它显示是 JPG，可能是伪 JPG、损坏图片或特殊编码图片。`
+      );
+    }
+  };
+
+  const generateBeadProject = async () => {
+    if (!converterImage) {
+      setConverterMessage("先上传一张图片");
+      return null;
+    }
+    setIsConvertingImage(true);
+    setConverterMessage("正在生成拼豆稿...");
+
+    try {
+      const size = parseConverterBoardSize();
+      const result = await createBeadProjectFromImage(
+        converterImage,
+        size.rows,
+        size.cols,
+        converterPalette,
+        selectedColorId,
+        converterColorLimit,
+        converterFitMode,
+        converterTransparentAsEmpty,
+        converterRemoveBackground,
+        converterBackgroundMode
+      );
+      const project = result.project;
+      setConverterProject(project);
+      const backgroundModeLabel =
+        converterBackgroundMode === "edge-multi"
+          ? "强力去背景"
+          : converterBackgroundMode === "edge-dominant"
+            ? "标准去背景"
+            : "保守去背景";
+      setConverterMessage(
+        `已生成 ${project.rows} x ${project.cols} · ${project.cells.filter((cell) => cell !== EMPTY_CELL).length.toLocaleString()} 颗${
+          result.removedBackgroundCount > 0
+            ? ` · ${backgroundModeLabel}去除 ${result.removedBackgroundCount.toLocaleString()} 格`
+            : ""
+        }`
+      );
+      return project;
+    } catch (error) {
+      setConverterMessage(error instanceof Error ? error.message : "生成失败，换张图片试试");
+      return null;
+    } finally {
+      setIsConvertingImage(false);
+    }
+  };
+
+  const exportConverterProjectImage = async (project: ProjectData) => {
+    const offscreen = createBeadPatternSheetCanvas(project, paletteMap, colorLookup, {
+      showMinorGrid: converterExportMinorGrid,
+      showMajorGrid: converterExportMajorGrid,
+      showColorCodes: converterExportColorCodes
+    });
+    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
+    if (!blob) {
+      setConverterMessage("导出失败，浏览器没有生成图片");
+      return;
+    }
+    downloadFile(blob, `${project.name || "图片转拼豆"}.png`);
+    setConverterMessage("已导出 PNG");
+  };
+
+  const applyConverterProject = () => {
+    if (!converterProject) {
+      return;
+    }
+    importProject(converterProject);
+    const nextPalette = getPaletteById(converterProject.paletteId, customPalettes);
+    setSelectedBrandId(nextPalette.brandId);
+    setProjectLibraryMessage("已应用图片转换结果，可保存到作品库");
+    setActiveLibraryProjectId(null);
+    navigateTo("editor");
+  };
+
+  const generateAndExportConverterImage = async () => {
+    const project = await generateBeadProject();
+    if (!project) {
+      return;
+    }
+    await exportConverterProjectImage(project);
   };
 
   const chooseColor = useCallback(
@@ -2306,13 +3195,249 @@ function App() {
     </div>
   ) : null;
 
+  const imageConverterPage = (
+    <main className="route-page">
+      <section className="route-page-panel image-converter-page">
+        <div className="route-page-header">
+          <div>
+            <p className="eyebrow">Image Converter</p>
+            <h1>图片转拼豆</h1>
+          </div>
+          <button className="action-button solid" type="button" onClick={() => navigateTo("editor")}>
+            返回编辑器
+          </button>
+        </div>
+        <div className="converter-layout">
+          <section className="converter-uploader">
+            {converterImage ? (
+              <img className="converter-source-image" src={converterImage.src} alt="" />
+            ) : (
+              <ImageUp size={34} aria-hidden="true" />
+            )}
+            <strong>{converterImage ? converterImage.name : "上传图片"}</strong>
+            <span>
+              {converterImage
+                ? `${converterImage.width} x ${converterImage.height} · ${converterImage.fileType} · ${formatFileSize(converterImage.fileSize)}`
+                : "支持 JPG / PNG / WebP / AVIF，本地读取不上传"}
+            </span>
+            <label className="action-button solid converter-upload-button">
+              选择图片
+              <input type="file" accept=".jpg,.jpeg,.png,.webp,.avif,image/jpeg,image/png,image/webp,image/avif" onChange={handleConverterImageChange} />
+            </label>
+            <p className="converter-upload-status">{converterMessage}</p>
+          </section>
+          <section className="converter-settings">
+            <div className="section-head">
+              <h2>生成设置</h2>
+              <span>{converterMessage}</span>
+            </div>
+            <label>
+              画布尺寸
+              <select
+                className="text-input"
+                value={converterBoardSize}
+                onChange={(event) => {
+                  setConverterBoardSize(event.target.value);
+                  setConverterProject(null);
+                }}
+              >
+                {converterBoardOptions.map((preset) => (
+                  <option key={preset.label} value={`${preset.rows}x${preset.cols}`}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              色卡
+              <select
+                className="text-input"
+                value={converterPalette.id}
+                onChange={(event) => {
+                  setConverterPaletteId(event.target.value);
+                  setConverterProject(null);
+                }}
+              >
+                {availablePalettes.map((palette) => (
+                  <option key={palette.id} value={palette.id}>
+                    {palette.brandLabel} · {palette.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              最大颜色数
+              <select
+                className="text-input"
+                value={converterColorLimit}
+                onChange={(event) => {
+                  setConverterColorLimit(event.target.value);
+                  setConverterProject(null);
+                }}
+              >
+                <option value="auto">不限，按色卡自动匹配</option>
+                <option value="few">最多 16 色</option>
+                <option value="medium">最多 32 色</option>
+                <option value="many">最多 64 色</option>
+              </select>
+            </label>
+            <label>
+              图片适配
+              <select
+                className="text-input"
+                value={converterFitMode}
+                onChange={(event) => {
+                  setConverterFitMode(event.target.value as ConverterFitMode);
+                  setConverterProject(null);
+                }}
+              >
+                <option value="cover">铺满画布，可能裁剪边缘</option>
+                <option value="contain">完整显示，可能留白</option>
+              </select>
+            </label>
+            <div className="converter-setting-group">
+              <div className="section-head compact">
+                <h2>背景处理</h2>
+              </div>
+              <label className="checkbox-row converter-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={converterTransparentAsEmpty}
+                  onChange={(event) => {
+                    setConverterTransparentAsEmpty(event.target.checked);
+                    setConverterProject(null);
+                  }}
+                />
+                透明区域留空
+              </label>
+              <label className="checkbox-row converter-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={converterRemoveBackground}
+                  onChange={(event) => {
+                    setConverterRemoveBackground(event.target.checked);
+                    setConverterProject(null);
+                  }}
+                />
+                去除外部背景
+              </label>
+              <label>
+                去背景强度
+                <select
+                  className="text-input"
+                  value={converterBackgroundMode}
+                  onChange={(event) => {
+                    setConverterBackgroundMode(event.target.value as ConverterBackgroundMode);
+                    setConverterProject(null);
+                  }}
+                  disabled={!converterRemoveBackground}
+                >
+                  <option value="light">保守：只去白色 / 浅色背景</option>
+                  <option value="edge-dominant">标准：去除边缘最多颜色</option>
+                  <option value="edge-multi">强力：边缘多色背景，可能误删</option>
+                </select>
+              </label>
+            </div>
+            <div className="converter-setting-group">
+              <div className="section-head compact">
+                <h2>导出设置</h2>
+              </div>
+              <label className="checkbox-row converter-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={converterExportMinorGrid}
+                  onChange={(event) => setConverterExportMinorGrid(event.target.checked)}
+                />
+                普通网格
+              </label>
+              <label className="checkbox-row converter-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={converterExportMajorGrid}
+                  onChange={(event) => setConverterExportMajorGrid(event.target.checked)}
+                />
+                5x5 辅助线
+              </label>
+              <label className="checkbox-row converter-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={converterExportColorCodes}
+                  onChange={(event) => setConverterExportColorCodes(event.target.checked)}
+                />
+                显示色号
+              </label>
+            </div>
+            <div className="converter-action-panel">
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => void generateBeadProject()}
+                disabled={!converterImage || isConvertingImage}
+              >
+                {isConvertingImage ? "生成中..." : "生成预览"}
+              </button>
+              <button
+                className="action-button solid converter-export-button"
+                type="button"
+                onClick={() => void generateAndExportConverterImage()}
+                disabled={!converterImage || isConvertingImage}
+              >
+                导出 PNG
+              </button>
+              <button
+                className="action-button"
+                type="button"
+                onClick={applyConverterProject}
+                disabled={!converterProject}
+              >
+                应用到编辑器
+              </button>
+            </div>
+          </section>
+          <section className="converter-preview">
+            {converterProject ? (
+              <>
+                <div className="converter-preview-head">
+                  <div>
+                    <strong>{converterProject.rows} x {converterProject.cols}</strong>
+                    <span>
+                      {converterUsage.reduce((sum, item) => sum + item.count, 0).toLocaleString()} 颗 ·{" "}
+                      {converterUsage.length} 色
+                    </span>
+                  </div>
+                  <span>预览会跟随导出设置</span>
+                </div>
+                <div className="converter-canvas-wrap">
+                  <canvas ref={converterPreviewCanvasRef} aria-label="图片转拼豆预览" />
+                </div>
+                <div className="converter-usage-list">
+                  {converterUsage.slice(0, 10).map(({ color, count }) => (
+                    <span key={color.id}>
+                      <i style={{ background: color.hex }} />
+                      {color.code} · {count}
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="empty-state compact">
+                <strong>等待生成</strong>
+                <p>图片转换后会在这里预览，再应用到编辑器画布。</p>
+              </div>
+            )}
+          </section>
+        </div>
+      </section>
+    </main>
+  );
+
   return (
     <div
       className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""} ${
         isColorLabCollapsed || isColorLabFloating ? "color-lab-collapsed" : ""
       } ${isUsageExpanded ? "usage-expanded" : "usage-collapsed"}`}
     >
-      {projectLibraryModal}
+      {currentRoute === "editor" ? projectLibraryModal : null}
       <input
         ref={referenceFileInputRef}
         className="visually-hidden-input"
@@ -2325,6 +3450,24 @@ function App() {
           <h2>Cyber 拼豆工坊</h2>
           <p className="muted">{name}</p>
         </div>
+        <nav className="app-route-tabs" aria-label="页面导航">
+          <button
+            className={`route-tab ${currentRoute === "editor" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("editor")}
+          >
+            <Grid3X3 size={15} aria-hidden="true" />
+            编辑器
+          </button>
+          <button
+            className={`route-tab ${currentRoute === "image-converter" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("image-converter")}
+          >
+            <ImageUp size={15} aria-hidden="true" />
+            图片转拼豆
+          </button>
+        </nav>
         <div className="summary-strip">
           <div>
             <strong>{rows} x {cols}</strong>
@@ -2342,18 +3485,22 @@ function App() {
             <strong>5x5 辅助线 {showMajorGrid ? "开" : "关"}</strong>
           </div>
         </div>
-        <div className="top-actions">
-          <button className="action-button solid" type="button" onClick={() => exportImage("png")}>
-            <Download size={16} aria-hidden="true" />
-            导出 PNG
-          </button>
-          <button className="action-button" type="button" onClick={() => exportImage("jpg")}>
-            <Download size={16} aria-hidden="true" />
-            导出 JPG
-          </button>
-        </div>
+        {currentRoute === "editor" ? (
+          <div className="top-actions">
+            <button className="action-button solid" type="button" onClick={() => exportImage("png")}>
+              <Download size={16} aria-hidden="true" />
+              导出 PNG
+            </button>
+            <button className="action-button" type="button" onClick={() => exportImage("jpg")}>
+              <Download size={16} aria-hidden="true" />
+              导出 JPG
+            </button>
+          </div>
+        ) : null}
       </section>
 
+      {currentRoute === "editor" ? (
+        <>
       <aside className="sidebar">
         <button
           className="sidebar-toggle-button"
@@ -2680,6 +3827,10 @@ function App() {
         {referencePanel}
       </main>
       {colorUsagePanel}
+        </>
+      ) : (
+        imageConverterPage
+      )}
     </div>
   );
 }
